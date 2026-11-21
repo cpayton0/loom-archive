@@ -1,6 +1,6 @@
 {
   "identifier": "main-analyzer",
-  "description": "The local main window can inspect recordings, open their Loom pages, manage settings, per-download destinations and the download history, read a link list chosen in a native dialog, and save or cancel downloads.",
+  "description": "The local main window can inspect recordings, open their Loom pages, manage settings, per-download destinations and the download history, read a link list chosen in a native dialog, save or cancel downloads, and manage diagnostic logs.",
   "windows": [
     "main"
   ],
@@ -12,6 +12,8 @@
     "allow-set-retries",
     "allow-set-batch",
     "allow-set-resume",
+    "allow-set-diagnostics",
+    "allow-open-log-folder",
     "allow-downloaded",
     "allow-open-link-list",
     "allow-choose-folder",

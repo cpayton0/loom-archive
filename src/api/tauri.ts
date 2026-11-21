@@ -38,6 +38,7 @@ export interface Settings extends SaveOptions {
   batchDelaySecs: number;
   skipDownloaded: boolean;
   resume: boolean;
+  diagnostics: boolean;
 }
 
 export interface AppInfo { version: string; ffmpeg: string | null; }
@@ -69,6 +70,8 @@ export const setBatch = (concurrency: number, delaySecs: number, skipDownloaded:
 export const downloaded = (urls: string[]) => call<boolean[]>("downloaded", { urls });
 /** Opens a .txt list in a native dialog; Rust reads it and returns its non-empty lines. */
 export const openLinkList = () => call<string[] | null>("open_link_list");
+export const setDiagnostics = (diagnostics: boolean) => call<Settings>("set_diagnostics", { diagnostics });
+export const openLogFolder = () => call<void>("open_log_folder");
 export const setResume = (resume: boolean) => call<Settings>("set_resume", { resume });
 export const setRetries = (retries: number) => call<Settings>("set_retries", { retries });
 export const chooseFolder = () => call<Settings>("choose_folder");

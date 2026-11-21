@@ -159,20 +159,33 @@ async fn run_ffmpeg(
     cancel: &CancellationToken,
     progress: &impl Fn(TransferProgress),
 ) -> Result<(), SaveError> {
+    let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-nostats", "-v", "error"]
+        .into_iter()
+        .chain(["-progress", "pipe:1"])
+        .map(String::from)
+        .collect();
+    for (options, input) in &job.inputs {
+        args.extend(options.iter().cloned());
+        args.extend(["-i".to_string(), input.clone()]);
+    }
+    args.extend(job.maps.iter().cloned());
+    // Same output options as upstream.
+    args.extend(
+        ["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", "-y"]
+            .map(String::from),
+    );
+    crate::diagnostics::log(|| {
+        format!(
+            "FFmpeg: {} <output>",
+            crate::diagnostics::command_line(&exe.display().to_string(), &args)
+        )
+    });
     let mut cmd = Command::new(exe);
     cmd.kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .args(["-nostdin", "-hide_banner", "-nostats", "-v", "error"])
-        .args(["-progress", "pipe:1"]);
-    for (options, input) in &job.inputs {
-        cmd.args(options).args(["-i", input]);
-    }
-    cmd.args(&job.maps)
-        // Same output options as upstream.
-        .args(["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"])
-        .args(["-f", "mp4", "-y"])
+        .args(&args)
         .arg(out);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -207,8 +220,18 @@ async fn run_ffmpeg(
     };
     let Some((errors, status)) = outcome else {
         let _ = child.kill().await;
+        crate::diagnostics::log(|| "FFmpeg stopped: canceled".into());
         return Err(SaveError::Canceled);
     };
+    crate::diagnostics::log(|| {
+        let text = String::from_utf8_lossy(&errors);
+        let code = status.as_ref().map_or("not started".into(), |s| s.to_string());
+        if text.trim().is_empty() {
+            format!("FFmpeg finished: {code}")
+        } else {
+            format!("FFmpeg finished: {code}\n--- FFmpeg errors ---\n{}", text.trim_end())
+        }
+    });
     match status {
         Ok(status) if status.success() => Ok(()),
         _ => Err(classify_failure(&String::from_utf8_lossy(&errors))),

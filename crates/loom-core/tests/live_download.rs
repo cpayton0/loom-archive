@@ -19,6 +19,7 @@ async fn live_share_download() {
             ..SaveOptions::default()
         },
         retries: 1,
+        diagnostics: Some(loom_core::Diagnostics::default()),
         ..SaveRequest::default()
     };
     let saved = save_recording(

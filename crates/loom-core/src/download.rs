@@ -109,10 +109,13 @@ where
     let mut made = 0;
     loop {
         match attempt().await {
-            Err(SaveError::Interrupted | SaveError::Page(AnalyzeError::Network))
+            Err(error @ (SaveError::Interrupted | SaveError::Page(AnalyzeError::Network)))
                 if made < retries =>
             {
                 let wait = retry_delay(made);
+                crate::diagnostics::log(|| {
+                    format!("Attempt {} failed ({error:?}); retrying in {} s", made + 1, wait.as_secs())
+                });
                 made += 1;
                 let slept = cancelable(cancel, async {
                     tokio::time::sleep(wait).await;
@@ -159,6 +162,8 @@ pub struct SaveRequest {
     /// Keep an interrupted direct-MP4 download and continue it with an HTTP
     /// range request (upstream `--resume`). HLS downloads always restart.
     pub resume: bool,
+    /// Collects a redacted log of this download when set.
+    pub diagnostics: Option<crate::Diagnostics>,
 }
 
 fn custom_base(name: &str) -> Result<String, SaveError> {
@@ -314,6 +319,43 @@ pub async fn save_recording(
     cancel: &CancellationToken,
     progress: impl Fn(TransferProgress),
 ) -> Result<SavedFiles, SaveError> {
+    crate::diagnostics::scope(request.diagnostics.clone(), async {
+        use crate::diagnostics::log;
+        log(|| format!("Loom Archive {} download", env!("CARGO_PKG_VERSION")));
+        log(|| format!("Options: {:?}", request.options));
+        log(|| {
+            format!(
+                "Custom file name: {}; prefix: {:?}; retries: {}; resume: {}",
+                request.file_name.is_some(),
+                request.prefix,
+                request.retries,
+                request.resume
+            )
+        });
+        let result = save_recording_inner(input, folder, request, cancel, progress).await;
+        match &result {
+            Ok(saved) => {
+                for file in &saved.files {
+                    log(|| format!("Saved {}", file.display()));
+                }
+                for note in &saved.notes {
+                    log(|| format!("Note: {note}"));
+                }
+            }
+            Err(error) => log(|| format!("Failed: {error} ({error:?})")),
+        }
+        result
+    })
+    .await
+}
+
+async fn save_recording_inner(
+    input: &str,
+    folder: &Path,
+    request: &SaveRequest,
+    cancel: &CancellationToken,
+    progress: impl Fn(TransferProgress),
+) -> Result<SavedFiles, SaveError> {
     let options = &request.options;
     let custom = match request.file_name.as_deref() {
         Some(name) if !name.trim().is_empty() => Some(custom_base(name)?),
@@ -359,6 +401,14 @@ pub async fn save_recording(
     };
     if let Some(path) = plan.media.take() {
         let media = page.media?;
+        crate::diagnostics::log(|| match &media {
+            MediaSource::Hls(s) => format!(
+                "Media: HLS {} (cookies: {})",
+                crate::diagnostics::safe_url(&s.url),
+                s.cookies.is_some()
+            ),
+            MediaSource::Mp4(url) => format!("Media: direct MP4 {}", crate::diagnostics::safe_url(url)),
+        });
         let duration = page.video.duration_seconds;
         let (result, attempt) = with_retries(request.retries, cancel, || {
             save_media(request, &page.video.id, duration, &media, &path, cancel, &progress)
@@ -754,6 +804,13 @@ where
         length(&response),
         meta.as_ref().map(|m| m.total),
     );
+    crate::diagnostics::log(|| {
+        format!(
+            "Direct MP4: partial {have} bytes, reply {} {:?}, decision {decision:?}",
+            response.status(),
+            range
+        )
+    });
     let (response, start, total) = match decision {
         Some((start, total)) => (response, start, total),
         None => {
