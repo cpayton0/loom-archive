@@ -70,6 +70,10 @@ pub struct SaveOptions {
     pub thumbnail: bool,
     /// Also save `<name>.captions.vtt`. Upstream lists captions but never saves them.
     pub captions: bool,
+    /// Also save `<name>-thumbnail.gif` (upstream `--gif`).
+    pub gif: bool,
+    /// Also save `<name>-seek-preview.jpg` and `.vtt` (upstream `--seek-preview`).
+    pub seek_preview: bool,
     pub collision: Collision,
 }
 

@@ -23,6 +23,8 @@ export interface SaveOptions {
   transcript: boolean;
   thumbnail: boolean;
   captions: boolean;
+  gif: boolean;
+  seekPreview: boolean;
   collision: Collision;
 }
 
@@ -49,8 +51,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 }
 
 export function saveOptions(settings: Settings): SaveOptions {
-  const { naming, content, quality, transcript, thumbnail, captions, collision } = settings;
-  return { naming, content, quality, transcript, thumbnail, captions, collision };
+  const { naming, content, quality, transcript, thumbnail, captions, gif, seekPreview, collision } = settings;
+  return { naming, content, quality, transcript, thumbnail, captions, gif, seekPreview, collision };
 }
 
 export const analyzeUrl = (url: string) => call<VideoDescriptor>("analyze_url", { url });

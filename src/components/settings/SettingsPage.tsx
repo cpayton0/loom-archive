@@ -112,6 +112,14 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
               <Switch id="default-thumbnail" checked={settings.thumbnail} onCheckedChange={thumbnail => set({ thumbnail })} />
               <Label htmlFor="default-thumbnail" className="font-normal">Thumbnail (-thumbnail.jpg)</Label>
             </div>
+            <div className="flex items-center gap-2">
+              <Switch id="default-gif" checked={settings.gif} onCheckedChange={gif => set({ gif })} />
+              <Label htmlFor="default-gif" className="font-normal">GIF preview (-thumbnail.gif)</Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch id="default-seek" checked={settings.seekPreview} onCheckedChange={seekPreview => set({ seekPreview })} />
+              <Label htmlFor="default-seek" className="font-normal">Seek preview (-seek-preview.jpg + .vtt)</Label>
+            </div>
           </div>
         </SettingRow>
         <SettingRow title="If a file already exists" labelId="collision-label" description="Existing files are never overwritten.">

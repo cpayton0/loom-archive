@@ -85,6 +85,79 @@ fn scoped_mp4_in_html(html: &str, id: &str) -> Option<Url> {
         .find(|url| direct_file(url) && names_recording(url, id))
 }
 
+/// Scrubber thumbnails: a sprite image and the WebVTT file that indexes it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeekPreview {
+    pub image: Option<Url>,
+    pub vtt: Option<Url>,
+}
+
+impl SeekPreview {
+    fn add(&mut self, url: Url) {
+        let path = url.path().to_ascii_lowercase();
+        if !path.contains("seekpreview") {
+            return;
+        }
+        if path.ends_with(".jpg") {
+            self.image.get_or_insert(url);
+        } else if path.ends_with(".vtt") {
+            self.vtt.get_or_insert(url);
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.image.is_some() && self.vtt.is_some()
+    }
+}
+
+/// Every string reachable from `value`, following Apollo `__ref`s a few levels deep.
+fn strings<'a>(state: &'a Value, value: &'a Value, depth: u8, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Array(items) if depth > 0 => {
+            items.iter().for_each(|v| strings(state, v, depth - 1, out));
+        }
+        Value::Object(map) if depth > 0 => match map.get("__ref").and_then(Value::as_str) {
+            Some(key) => {
+                if let Some(target) = state.get(key) {
+                    strings(state, target, depth - 1, out);
+                }
+            }
+            None => map.values().for_each(|v| strings(state, v, depth - 1, out)),
+        },
+        _ => {}
+    }
+}
+
+/// Upstream's seek-preview search: Apollo data first, then the page markup,
+/// where JSON escapes `&` as `\u0026`.
+fn seek_preview(state: &Value, video: &Value, html: &str, one_recording: bool) -> SeekPreview {
+    let mut found = SeekPreview::default();
+    let add_all = |values: Vec<&str>, found: &mut SeekPreview| {
+        values
+            .into_iter()
+            .filter_map(|s| https_url(&Value::from(s)))
+            .for_each(|u| found.add(u));
+    };
+    let mut values = Vec::new();
+    strings(state, video, 4, &mut values);
+    add_all(values, &mut found);
+    if one_recording && !found.complete() {
+        let mut values = Vec::new();
+        strings(state, state, 4, &mut values);
+        add_all(values, &mut found);
+    }
+    if one_recording && !found.complete() {
+        let unescaped = html.replace("\\u0026", "&");
+        unescaped
+            .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '<' | '>'))
+            .filter(|t| t.starts_with("https://") && t.contains("seekpreview"))
+            .filter_map(|t| Url::parse(t).ok())
+            .for_each(|u| found.add(u));
+    }
+    found
+}
+
 /// The playback stream reported by the share page, plus the CloudFront cookies
 /// Loom's player sends with the playlist and segment requests.
 #[derive(Debug)]
@@ -158,6 +231,7 @@ pub(crate) struct PageInfo {
     pub media: Result<MediaSource, AnalyzeError>,
     pub transcript: Option<Url>,
     pub captions: Option<Url>,
+    pub seek_preview: SeekPreview,
 }
 
 pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeError> {
@@ -253,6 +327,8 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         }
     }
 
+    let seek_preview = seek_preview(&state, video, html, one_recording);
+
     // Upstream order: the HLS stream the player uses, then a direct MP4 only
     // when the page reports no usable HLS URL.
     let media = match (hls, mp4.or_else(|| scoped_mp4_in_html(html, id))) {
@@ -286,6 +362,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         media,
         transcript,
         captions,
+        seek_preview,
     })
 }
 
@@ -305,6 +382,26 @@ mod tests {
             info.transcript.unwrap().as_str(),
             "https://cdn.loom.com/example/transcript.json"
         );
+    }
+
+    #[test]
+    fn seek_preview_comes_from_the_recording_then_the_page() {
+        let state = serde_json::json!({
+            "RegularUserVideo:a": {"id":"a","__typename":"RegularUserVideo","media":{"__ref":"Media:1"}},
+            "Media:1": {"seek": "https://cdn.loom.com/mediametadata/seekpreview/a/sprite.jpg?Policy=x"}
+        });
+        let video = &state["RegularUserVideo:a"];
+        let html = r#"<script>x="https://cdn.loom.com/mediametadata/seekpreview/a/index.vtt?Policy=p\u0026Signature=s"</script>"#;
+        let found = seek_preview(&state, video, html, true);
+        assert_eq!(found.image.unwrap().path(), "/mediametadata/seekpreview/a/sprite.jpg");
+        let vtt = found.vtt.unwrap();
+        assert_eq!(vtt.query(), Some("Policy=p&Signature=s"));
+        // With several recordings on the page, only the selected record counts.
+        let scoped = seek_preview(&state, video, html, false);
+        assert!(scoped.image.is_some() && scoped.vtt.is_none());
+        // Plain http and unrelated files are ignored.
+        let other = r#""http://cdn.loom.com/mediametadata/seekpreview/a/x.vtt" "https://cdn.loom.com/a.vtt""#;
+        assert_eq!(seek_preview(&Value::Null, &Value::Null, other, true), SeekPreview::default());
     }
 
     #[test]

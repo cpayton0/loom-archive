@@ -1,6 +1,6 @@
 # Loom Archive
 
-Loom Archive is a Windows-first Tauri 2 desktop app for inspecting and saving Loom recordings. Paste a link and choose **Analyze link** to see the recording ID, title, media source and optional assets. The download page keeps the common choices in view: an optional file-name override, a destination folder (**Browse** changes it for the current download only), the format (video MP4, audio M4A or transcript JSON), video quality, and whether to also save the transcript, captions and thumbnail. These per-download choices are layered over your defaults and never change them. The app shows progress (a percentage for FFmpeg downloads, based on the recording's length) and supports cancellation; the form is kept while you visit Settings.
+Loom Archive is a Windows-first Tauri 2 desktop app for inspecting and saving Loom recordings. Paste a link and choose **Analyze link** to see the recording ID, title, media source and optional assets. The download page keeps the common choices in view: an optional file-name override, a destination folder (**Browse** changes it for the current download only), the format (video MP4, audio M4A or transcript JSON), video quality, and whether to also save the transcript, captions, thumbnail, GIF preview and seek preview. These per-download choices are layered over your defaults and never change them. The app shows progress (a percentage for FFmpeg downloads, based on the recording's length) and supports cancellation; the form is kept while you visit Settings.
 
 **Settings** is a separate page with saved defaults, stored in `settings.json` in the app's config folder:
 
@@ -10,7 +10,7 @@ Loom Archive is a Windows-first Tauri 2 desktop app for inspecting and saving Lo
 | | File naming: recording title or video ID | `--use-title` / default |
 | | Default format: video, audio only (new), transcript only | default / `--transcript-only` |
 | | Default quality: auto, best, 1080p, 720p or 480p and lower | `--quality` (declared upstream but unused there) |
-| | Also save transcript `<name>.transcript.json`, captions `<name>.captions.vtt` and thumbnail `<name>-thumbnail.jpg` | `--transcript`, *new*, `--image` |
+| | Also save transcript `<name>.transcript.json`, captions `<name>.captions.vtt`, thumbnail `<name>-thumbnail.jpg`, GIF preview `<name>-thumbnail.gif` and seek preview `<name>-seek-preview.jpg` + `.vtt` | `--transcript`, *new*, `--image`, `--gif`, `--seek-preview` |
 | | If a file exists: stop, or add a number such as `name (2)` | — (upstream overwrites) |
 | Advanced | FFmpeg location (automatic or a chosen `ffmpeg.exe`), retries after an interrupted transfer, waiting 1 s, 2 s, 4 s … (up to 32 s) as upstream's backoff does | — |
 | Appearance / About | Theme: dark (default), light, or match Windows; version and third-party licenses | — |
@@ -19,7 +19,7 @@ Concurrent downloads and diagnostic logging are shown as unavailable: the app do
 
 The interface uses React, Tailwind CSS v4 and shadcn/ui components with Lucide icons. Running `pnpm dev` in a regular browser substitutes sample data for the Tauri backend so layouts can be checked; production builds do not include it.
 
-Auto quality passes Loom's playlist to FFmpeg unchanged, as upstream does. Any other quality reads the master playlist and passes the chosen video variant and its audio rendition to FFmpeg as separate inputs. Audio only maps the first audio stream and saves an M4A. A transcript, captions file or thumbnail that cannot be saved is reported as a note and does not undo a saved video. Existing files are never overwritten.
+Auto quality passes Loom's playlist to FFmpeg unchanged, as upstream does. Any other quality reads the master playlist and passes the chosen video variant and its audio rendition to FFmpeg as separate inputs. Audio only maps the first audio stream and saves an M4A. The seek preview is read from the share page or, failing that, from Loom's `GetVideoSeekPreview` query, as upstream does. A transcript, captions file, thumbnail or preview that cannot be saved is reported as a note and does not undo a saved video. Existing files are never overwritten.
 
 ## Run locally
 

@@ -3,7 +3,7 @@ use crate::{
     hls::find_ffmpeg, normalize_share_url,
     options::sanitize_filename,
     page::MediaSource,
-    transport::{fetch_asset, fetch_media, read_limited, resolve_recording},
+    transport::{fetch_asset, fetch_media, read_limited, resolve_recording, seek_preview_vtt},
 };
 use mp4::{Mp4Reader, TrackType};
 use serde::Serialize;
@@ -38,6 +38,8 @@ pub enum SaveError {
     NoTranscript,
     #[error("Loom did not list captions for this recording.")]
     NoCaptions,
+    #[error("Loom did not provide a seek preview for this recording.")]
+    NoSeekPreview,
     #[error("Enter a file name that contains letters or numbers and is allowed on Windows.")]
     InvalidFileName,
     #[error("The transfer was interrupted. Check your connection and try again.")]
@@ -167,6 +169,9 @@ struct Plan {
     transcript: Option<PathBuf>,
     thumbnail: Option<PathBuf>,
     captions: Option<PathBuf>,
+    gif: Option<PathBuf>,
+    seek_image: Option<PathBuf>,
+    seek_vtt: Option<PathBuf>,
 }
 
 impl Plan {
@@ -186,13 +191,30 @@ impl Plan {
             captions: options
                 .captions
                 .then(|| folder.join(format!("{base}.captions.vtt"))),
+            gif: options
+                .gif
+                .then(|| folder.join(format!("{base}-thumbnail.gif"))),
+            seek_image: options
+                .seek_preview
+                .then(|| folder.join(format!("{base}-seek-preview.jpg"))),
+            seek_vtt: options
+                .seek_preview
+                .then(|| folder.join(format!("{base}-seek-preview.vtt"))),
         }
     }
 
     fn taken(&self) -> Result<Option<String>, SaveError> {
-        for path in [&self.media, &self.transcript, &self.thumbnail, &self.captions]
-            .into_iter()
-            .flatten()
+        for path in [
+            &self.media,
+            &self.transcript,
+            &self.thumbnail,
+            &self.captions,
+            &self.gif,
+            &self.seek_image,
+            &self.seek_vtt,
+        ]
+        .into_iter()
+        .flatten()
         {
             if path.try_exists().map_err(|_| SaveError::Storage)? {
                 return Ok(Some(display_name(path)));
@@ -307,7 +329,7 @@ pub async fn save_recording(
         notes: early_notes,
         ..SavedFiles::default()
     };
-    if let Some(path) = plan.media {
+    if let Some(path) = plan.media.take() {
         let media = page.media?;
         let duration = page.video.duration_seconds;
         let (result, attempt) = with_retries(request.retries, cancel, || {
@@ -324,9 +346,9 @@ pub async fn save_recording(
         saved.notes.extend(note);
         saved.files.push(path);
     }
-    let transcript_path = plan.transcript;
-    let thumbnail_path = plan.thumbnail;
-    let captions_path = plan.captions;
+    let transcript_path = plan.transcript.take();
+    let thumbnail_path = plan.thumbnail.take();
+    let captions_path = plan.captions.take();
 
     let mut record = |label: &str, path: PathBuf, result: Result<(), SaveError>| -> Result<(), SaveError> {
         match extra_outcome(label, transcript_only, result)? {
@@ -356,6 +378,31 @@ pub async fn save_recording(
     if let Some(path) = thumbnail_path {
         let result = cancelable(cancel, save_thumbnail(page.video.id.clone(), path.clone())).await;
         record("thumbnail", path, result)?;
+    }
+    if let Some(path) = plan.gif {
+        let result = cancelable(cancel, save_gif(page.video.id.clone(), path.clone())).await;
+        record("GIF thumbnail", path, result)?;
+    }
+    if let (Some(image_path), Some(vtt_path)) = (plan.seek_image, plan.seek_vtt) {
+        let urls = cancelable(cancel, async {
+            seek_preview_urls(&page.video.id, page.seek_preview).await
+        })
+        .await;
+        match urls {
+            Ok((image, vtt)) => {
+                let result = match image {
+                    Some(url) => cancelable(cancel, save_jpeg(url, image_path.clone())).await,
+                    None => Err(SaveError::NoSeekPreview),
+                };
+                record("seek preview image", image_path, result)?;
+                let result = match vtt {
+                    Some(url) => cancelable(cancel, save_webvtt(url, vtt_path.clone())).await,
+                    None => Err(SaveError::NoSeekPreview),
+                };
+                record("seek preview index", vtt_path, result)?;
+            }
+            Err(error) => record("seek preview", image_path, Err(error))?,
+        }
     }
     Ok(saved)
 }
@@ -388,11 +435,57 @@ async fn save_transcript(url: Url, path: PathBuf) -> Result<(), SaveError> {
 
 /// WebVTT captions from the page's `captions_source_url`.
 async fn save_captions(url: Url, path: PathBuf) -> Result<(), SaveError> {
+    save_webvtt(url, path).await
+}
+
+async fn save_webvtt(url: Url, path: PathBuf) -> Result<(), SaveError> {
     let body = read_limited(fetch_asset(url).await?, 8 * 1024 * 1024).await?;
     if !is_webvtt(&body) {
         return Err(SaveError::InvalidMedia);
     }
     write_new(path, body).await
+}
+
+async fn save_jpeg(url: Url, path: PathBuf) -> Result<(), SaveError> {
+    let body = read_limited(fetch_asset(url).await?, 50 * 1024 * 1024).await?;
+    if !body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Err(SaveError::InvalidMedia);
+    }
+    write_new(path, body).await
+}
+
+/// Upstream's `--gif` thumbnail path.
+async fn save_gif(id: String, path: PathBuf) -> Result<(), SaveError> {
+    let url = Url::parse(&format!(
+        "https://cdn.loom.com/sessions/thumbnails/{id}-00001.gif"
+    ))
+    .map_err(|_| AnalyzeError::InvalidMediaUrl)?;
+    let body = read_limited(fetch_asset(url).await?, 50 * 1024 * 1024).await?;
+    if !(body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")) {
+        return Err(SaveError::InvalidMedia);
+    }
+    write_new(path, body).await
+}
+
+/// Page data first; otherwise upstream's GraphQL fallback, whose sprite sits
+/// beside the index with a `.jpg` extension.
+async fn seek_preview_urls(
+    id: &str,
+    found: crate::page::SeekPreview,
+) -> Result<(Option<Url>, Option<Url>), SaveError> {
+    let vtt = match found.vtt {
+        Some(vtt) => Some(vtt),
+        None => seek_preview_vtt(id).await?,
+    };
+    let image = found.image.or_else(|| vtt.as_ref().and_then(sprite_beside));
+    Ok((image, vtt))
+}
+
+fn sprite_beside(vtt: &Url) -> Option<Url> {
+    let mut image = vtt.clone();
+    let path = vtt.path().strip_suffix(".vtt")?;
+    image.set_path(&format!("{path}.jpg"));
+    Some(image)
 }
 
 fn is_webvtt(body: &[u8]) -> bool {
@@ -595,6 +688,29 @@ mod tests {
             .find(|p| matches!(p.taken(), Ok(None)))
             .unwrap();
         assert_eq!(free.media.unwrap(), dir.path().join("rec (3).mp4"));
+    }
+
+    #[test]
+    fn the_seek_sprite_sits_beside_its_index() {
+        let vtt = Url::parse("https://cdn.loom.com/mediametadata/seekpreview/a/index.vtt?Policy=p").unwrap();
+        let image = sprite_beside(&vtt).unwrap();
+        assert_eq!(image.as_str(), "https://cdn.loom.com/mediametadata/seekpreview/a/index.jpg?Policy=p");
+        assert!(sprite_beside(&Url::parse("https://cdn.loom.com/a.json").unwrap()).is_none());
+    }
+
+    #[test]
+    fn extras_join_the_collision_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SaveOptions {
+            gif: true,
+            seek_preview: true,
+            ..SaveOptions::default()
+        };
+        std::fs::write(dir.path().join("rec-seek-preview.vtt"), b"x").unwrap();
+        assert_eq!(
+            Plan::new(dir.path(), "rec", &options).taken().unwrap().as_deref(),
+            Some("rec-seek-preview.vtt")
+        );
     }
 
     #[test]
