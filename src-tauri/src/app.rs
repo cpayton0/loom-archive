@@ -305,6 +305,7 @@ async fn save_recording<R: tauri::Runtime>(
     notify(TransferProgress {
         bytes: 0,
         total: None,
+        percent: None,
         finalizing: false,
     });
     match loom_core::save_recording(share.as_ref(), &folder, &request, &token, notify).await {

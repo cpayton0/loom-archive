@@ -114,7 +114,8 @@ export function DownloadPage({ settings, session, update }: { settings: Settings
       <DestinationPicker defaultFolder={settings.folder} override={session.folderOverride} disabled={busy}
         onBrowse={browse} onUseDefault={useDefault} />
 
-      <DownloadOptions options={options} transcriptListed={video ? video.assets.transcript : null} disabled={busy}
+      <DownloadOptions options={options} transcriptListed={video ? video.assets.transcript : null}
+        captionsListed={video ? video.assets.captions : null} disabled={busy}
         onChange={change => update(s => ({ ...s, overrides: { ...s.overrides, ...change } }))} />
 
       {changed && !busy && <div>

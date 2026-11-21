@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/Field";
 
-const shareLink = /^https:\/\/(www\.)?loom\.com\/share\/[0-9a-f]{32}\/?([?#]\S*)?$/i;
+// Share or embed links, optionally with a title slug; Rust does the authoritative check.
+const shareLink = /^https:\/\/(www\.)?loom\.com\/(share|embed)\/([\w.%-]+-)?[0-9a-f]{32}\/?([?#]\S*)?$/i;
 
 export function RecordingUrlInput({ value, busy, locked, error, onChange, onAnalyze }: {
   value: string; busy: boolean; locked: boolean; error: string;
@@ -21,9 +22,11 @@ export function RecordingUrlInput({ value, busy, locked, error, onChange, onAnal
     const pasted = event.clipboardData.getData("text");
     const next = value.slice(0, input.selectionStart ?? value.length) + pasted
       + value.slice(input.selectionEnd ?? value.length);
-    if (shareLink.test(next.trim())) {
+    // Shells escape `?` and `=` with backslashes; Rust strips them too.
+    const link = next.trim().replace(/\\/g, "");
+    if (shareLink.test(link)) {
       event.preventDefault();
-      onAnalyze(next.trim());
+      onAnalyze(link);
     }
   }
   return <form onSubmit={submit} noValidate>

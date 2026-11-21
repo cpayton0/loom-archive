@@ -157,6 +157,7 @@ pub(crate) struct PageInfo {
     pub video: VideoDescriptor,
     pub media: Result<MediaSource, AnalyzeError>,
     pub transcript: Option<Url>,
+    pub captions: Option<Url>,
 }
 
 pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeError> {
@@ -192,6 +193,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
     let mut mp4 = None;
     let mut assets = AssetHints::default();
     let mut transcript = None;
+    let mut captions = None;
     let fields = video.as_object().ok_or(AnalyzeError::PageFormat)?;
     for (key, value) in fields {
         if hls.is_none()
@@ -217,7 +219,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         }
         if value["__typename"] == "VideoTranscriptDetails" {
             transcript = transcript.or_else(|| https_url(&value["source_url"]));
-            assets.captions |= https_url(&value["captions_source_url"]).is_some();
+            captions = captions.or_else(|| https_url(&value["captions_source_url"]));
         }
     }
 
@@ -239,7 +241,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
     if one_recording {
         if let (Some(v), None) = (standalone.next(), standalone.next()) {
             transcript = transcript.or_else(|| https_url(&v["source_url"]));
-            assets.captions |= https_url(&v["captions_source_url"]).is_some();
+            captions = captions.or_else(|| https_url(&v["captions_source_url"]));
         }
         if mp4.is_none() {
             let sources =
@@ -260,6 +262,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         (None, None) => Err(AnalyzeError::NoMedia),
     };
     assets.transcript = transcript.is_some();
+    assets.captions = captions.is_some();
     let title = video["name"]
         .as_str()
         .map(str::trim)
@@ -282,6 +285,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         },
         media,
         transcript,
+        captions,
     })
 }
 

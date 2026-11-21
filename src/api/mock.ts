@@ -6,7 +6,7 @@ let settings: Settings = {
   theme: "dark",
   folder: "C:\\Users\\you\\Videos\\Loom Archive\\Customer calls\\2026",
   ffmpeg: null, retries: 1,
-  naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, collision: "stop",
+  naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, captions: false, collision: "stop",
 };
 let override: string | null = null;
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -46,8 +46,8 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
 }
 
 export async function mockSave(update: (p: TransferProgress) => void): Promise<SaveResult> {
-  for (let bytes = 0; bytes <= 40e6; bytes += 8e6) { update({ bytes, total: null, finalizing: false }); await wait(300); }
-  update({ bytes: 40e6, total: 40e6, finalizing: true });
+  for (let bytes = 0; bytes <= 40e6; bytes += 8e6) { update({ bytes, total: null, percent: bytes / 4e5, finalizing: false }); await wait(300); }
+  update({ bytes: 40e6, total: 40e6, percent: null, finalizing: true });
   await wait(300);
   const dir = override ?? settings.folder ?? "C:\\Users\\you\\Downloads";
   return { files: [`${dir}\\${video.title}.mp4`, `${dir}\\${video.title}.transcript.json`], notes: [] };

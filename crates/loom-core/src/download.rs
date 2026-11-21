@@ -23,6 +23,8 @@ use url::Url;
 pub struct TransferProgress {
     pub bytes: u64,
     pub total: Option<u64>,
+    /// 0–100 when the length is known in time rather than bytes (FFmpeg jobs).
+    pub percent: Option<f64>,
     pub finalizing: bool,
 }
 
@@ -34,6 +36,8 @@ pub enum SaveError {
     Exists(String),
     #[error("Loom did not list a transcript for this recording.")]
     NoTranscript,
+    #[error("Loom did not list captions for this recording.")]
+    NoCaptions,
     #[error("Enter a file name that contains letters or numbers and is allowed on Windows.")]
     InvalidFileName,
     #[error("The transfer was interrupted. Check your connection and try again.")]
@@ -80,6 +84,11 @@ async fn cancelable<T>(
     }
 }
 
+/// Delay before retry `attempt + 1`: 1 s doubling to a 32 s cap, as upstream.
+fn retry_delay(attempt: u8) -> Duration {
+    Duration::from_secs(1 << attempt.min(5))
+}
+
 /// One download: the effective options plus per-download and app overrides.
 #[derive(Clone, Debug, Default)]
 pub struct SaveRequest {
@@ -106,6 +115,7 @@ struct Plan {
     media: Option<PathBuf>,
     transcript: Option<PathBuf>,
     thumbnail: Option<PathBuf>,
+    captions: Option<PathBuf>,
 }
 
 impl Plan {
@@ -122,11 +132,14 @@ impl Plan {
             thumbnail: options
                 .thumbnail
                 .then(|| folder.join(format!("{base}-thumbnail.jpg"))),
+            captions: options
+                .captions
+                .then(|| folder.join(format!("{base}.captions.vtt"))),
         }
     }
 
     fn taken(&self) -> Result<Option<String>, SaveError> {
-        for path in [&self.media, &self.transcript, &self.thumbnail]
+        for path in [&self.media, &self.transcript, &self.thumbnail, &self.captions]
             .into_iter()
             .flatten()
         {
@@ -140,6 +153,7 @@ impl Plan {
 
 async fn save_media(
     request: &SaveRequest,
+    duration: Option<f64>,
     media: &MediaSource,
     path: &Path,
     cancel: &CancellationToken,
@@ -150,12 +164,22 @@ async fn save_media(
     let exe = || find_ffmpeg(request.ffmpeg.as_deref()).ok_or(SaveError::MissingFfmpeg);
     match media {
         MediaSource::Hls(stream) => {
-            crate::hls::save(&exe()?, stream, options.quality, audio_only, path, cancel, progress)
-                .await?;
+            crate::hls::save(
+                &exe()?,
+                stream,
+                options.quality,
+                audio_only,
+                duration,
+                path,
+                cancel,
+                progress,
+            )
+            .await?;
         }
         MediaSource::Mp4(url) if audio_only => {
             let job = crate::hls::Job::single(crate::hls::stream_options(None), url.as_str())
-                .maps(&["-map", "0:a:0", "-vn"]);
+                .maps(&["-map", "0:a:0", "-vn"])
+                .duration(duration);
             crate::hls::save_with(&exe()?, &job, Expect::Audio, path, cancel, progress).await?;
         }
         MediaSource::Mp4(url) => {
@@ -219,13 +243,21 @@ pub async fn save_recording(
     let mut saved = SavedFiles::default();
     if let Some(path) = plan.media {
         let media = page.media?;
+        let duration = page.video.duration_seconds;
         let mut attempt = 0;
         let note = loop {
-            match save_media(request, &media, &path, cancel, &progress).await {
+            match save_media(request, duration, &media, &path, cancel, &progress).await {
                 Err(SaveError::Interrupted | SaveError::Page(AnalyzeError::Network))
                     if attempt < request.retries =>
                 {
+                    // Upstream's backoff: wait 1 s, 2 s, 4 s … before each new attempt.
+                    let wait = retry_delay(attempt);
                     attempt += 1;
+                    cancelable(cancel, async {
+                        tokio::time::sleep(wait).await;
+                        Ok(())
+                    })
+                    .await?;
                 }
                 result => break result?,
             }
@@ -241,11 +273,13 @@ pub async fn save_recording(
     }
     let transcript_path = plan.transcript;
     let thumbnail_path = plan.thumbnail;
+    let captions_path = plan.captions;
 
     let mut record = |label: &str, path: PathBuf, result: Result<(), SaveError>| {
         match result {
             Ok(()) => saved.files.push(path),
-            Err(error) if transcript_only => return Err(error),
+            // In transcript-only mode the transcript is the download itself.
+            Err(error) if transcript_only && label == "transcript" => return Err(error),
             Err(SaveError::Canceled) => saved
                 .notes
                 .push(format!("Canceled before the {label} was saved.")),
@@ -262,6 +296,15 @@ pub async fn save_recording(
                 record("transcript", path, result)?;
             }
             None => record("transcript", path, Err(SaveError::NoTranscript))?,
+        }
+    }
+    if let Some(path) = captions_path {
+        match page.captions {
+            Some(url) => {
+                let result = cancelable(cancel, save_captions(url, path.clone())).await;
+                record("captions", path, result)?;
+            }
+            None => record("captions", path, Err(SaveError::NoCaptions))?,
         }
     }
     if let Some(path) = thumbnail_path {
@@ -295,6 +338,23 @@ async fn save_transcript(url: Url, path: PathBuf) -> Result<(), SaveError> {
     let data: Value = serde_json::from_slice(&body).map_err(|_| AnalyzeError::PageFormat)?;
     let text = serde_json::to_vec_pretty(&format_transcript(data)).map_err(|_| SaveError::Storage)?;
     write_new(path, text).await
+}
+
+/// WebVTT captions from the page's `captions_source_url`.
+async fn save_captions(url: Url, path: PathBuf) -> Result<(), SaveError> {
+    let body = read_limited(fetch_asset(url).await?, 8 * 1024 * 1024).await?;
+    if !is_webvtt(&body) {
+        return Err(SaveError::InvalidMedia);
+    }
+    write_new(path, body).await
+}
+
+fn is_webvtt(body: &[u8]) -> bool {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    body.starts_with(b"WEBVTT")
+        && body
+            .get(6)
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
 }
 
 /// Upstream's thumbnail path for `--image`.
@@ -354,6 +414,7 @@ async fn save_response(
     progress(TransferProgress {
         bytes,
         total,
+        percent: None,
         finalizing: false,
     });
     loop {
@@ -371,6 +432,7 @@ async fn save_response(
             progress(TransferProgress {
                 bytes,
                 total,
+                percent: None,
                 finalizing: false,
             });
             last = Instant::now();
@@ -385,6 +447,7 @@ async fn save_response(
     progress(TransferProgress {
         bytes,
         total,
+        percent: None,
         finalizing: true,
     });
     finish(temp_path, dest, bytes, cancel, Expect::Video).await
@@ -477,6 +540,21 @@ mod tests {
             .find(|p| matches!(p.taken(), Ok(None)))
             .unwrap();
         assert_eq!(free.media.unwrap(), dir.path().join("rec (3).mp4"));
+    }
+
+    #[test]
+    fn captions_must_be_webvtt() {
+        assert!(is_webvtt(b"WEBVTT\n\n00:00.000 --> 00:01.000\nHi"));
+        assert!(is_webvtt(b"\xEF\xBB\xBFWEBVTT - Loom\r\n"));
+        assert!(is_webvtt(b"WEBVTT"));
+        assert!(!is_webvtt(b"WEBVTTX"));
+        assert!(!is_webvtt(b"<Error><Code>AccessDenied</Code></Error>"));
+    }
+
+    #[test]
+    fn retries_back_off_exponentially_with_a_cap() {
+        let waits: Vec<_> = (0..8).map(|a| retry_delay(a).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
     }
 
     #[test]

@@ -105,6 +105,10 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
               <Label htmlFor="default-transcript" className="font-normal">Transcript (.transcript.json)</Label>
             </div>
             <div className="flex items-center gap-2">
+              <Switch id="default-captions" checked={settings.captions} onCheckedChange={captions => set({ captions })} />
+              <Label htmlFor="default-captions" className="font-normal">Captions (.captions.vtt)</Label>
+            </div>
+            <div className="flex items-center gap-2">
               <Switch id="default-thumbnail" checked={settings.thumbnail} onCheckedChange={thumbnail => set({ thumbnail })} />
               <Label htmlFor="default-thumbnail" className="font-normal">Thumbnail (-thumbnail.jpg)</Label>
             </div>
