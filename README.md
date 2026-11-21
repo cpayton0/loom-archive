@@ -12,10 +12,12 @@ Loom Archive is a Windows-first Tauri 2 desktop app for inspecting and saving Lo
 | | Default quality: auto, best, 1080p, 720p or 480p and lower | `--quality` (declared upstream but unused there) |
 | | Also save transcript `<name>.transcript.json`, captions `<name>.captions.vtt`, thumbnail `<name>-thumbnail.jpg`, GIF preview `<name>-thumbnail.gif` and seek preview `<name>-seek-preview.jpg` + `.vtt` | `--transcript`, *new*, `--image`, `--gif`, `--seek-preview` |
 | | If a file exists: stop, or add a number such as `name (2)` | — (upstream overwrites) |
-| Advanced | FFmpeg location (automatic or a chosen `ffmpeg.exe`), retries after an interrupted transfer, waiting 1 s, 2 s, 4 s … (up to 32 s) as upstream's backoff does | — |
+| Advanced | FFmpeg location (automatic or a chosen `ffmpeg.exe`); batch downloads at once, pause between them and skipping already-downloaded recordings (`--list` concurrency, `--timeout`, `downloaded.log`); retries after an interrupted transfer, waiting 1 s, 2 s, 4 s … (up to 32 s) as upstream's backoff does | — |
 | Appearance / About | Theme: dark (default), light, or match Windows; version and third-party licenses | — |
 
-Concurrent downloads and diagnostic logging are shown as unavailable: the app downloads one recording at a time.
+**Batch** (the second tab on the download page) mirrors upstream's `--list`: paste share links one per line or open a `.txt` list (read in Rust from a native file dialog; blank lines and `#` comments are ignored). Invalid lines and duplicates are flagged before starting. An optional numbering prefix names files `<prefix>-<n>-<name>` in list order, like `--prefix`. The batch uses the same format, quality, extras and destination as a single download; when no folder is set it asks once for the whole batch. Settings → Advanced controls how many downloads run at once (1–5, upstream uses 5), the pause after each one (upstream's `--timeout`) and whether to skip recordings already downloaded. Successful downloads are recorded by video ID in `downloaded.log` in the app's data folder, as upstream does. **Stop** cancels running downloads and the rest of the queue.
+
+Diagnostic logging is shown as unavailable.
 
 The interface uses React, Tailwind CSS v4 and shadcn/ui components with Lucide icons. Running `pnpm dev` in a regular browser substitutes sample data for the Tauri backend so layouts can be checked; production builds do not include it.
 

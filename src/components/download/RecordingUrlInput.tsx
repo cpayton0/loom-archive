@@ -3,9 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/Field";
-
-// Share or embed links, optionally with a title slug; Rust does the authoritative check.
-const shareLink = /^https:\/\/(www\.)?loom\.com\/(share|embed)\/([\w.%-]+-)?[0-9a-f]{32}\/?([?#]\S*)?$/i;
+import { cleanLink, shareLink } from "@/lib/links";
 
 export function RecordingUrlInput({ value, busy, locked, error, onChange, onAnalyze }: {
   value: string; busy: boolean; locked: boolean; error: string;
@@ -22,8 +20,7 @@ export function RecordingUrlInput({ value, busy, locked, error, onChange, onAnal
     const pasted = event.clipboardData.getData("text");
     const next = value.slice(0, input.selectionStart ?? value.length) + pasted
       + value.slice(input.selectionEnd ?? value.length);
-    // Shells escape `?` and `=` with backslashes; Rust strips them too.
-    const link = next.trim().replace(/\\/g, "");
+    const link = cleanLink(next);
     if (shareLink.test(link)) {
       event.preventDefault();
       onAnalyze(link);
