@@ -54,6 +54,8 @@ struct Settings {
     batch_delay_secs: u16,
     /// Skip links already in the download history (upstream `downloaded.log`).
     skip_downloaded: bool,
+    /// Continue interrupted direct-MP4 downloads (upstream `--resume`, on by default).
+    resume: bool,
     #[serde(flatten)]
     options: SaveOptions,
 }
@@ -68,6 +70,7 @@ impl Default for Settings {
             concurrency: 2,
             batch_delay_secs: 5,
             skip_downloaded: true,
+            resume: true,
             options: SaveOptions::default(),
         }
     }
@@ -286,6 +289,11 @@ fn parse_link_list(text: &str) -> Vec<String> {
 }
 
 #[tauri::command]
+fn set_resume(store: State<'_, SettingsStore>, resume: bool) -> Result<Settings, String> {
+    store.update(|s| s.resume = resume)
+}
+
+#[tauri::command]
 fn set_retries(store: State<'_, SettingsStore>, retries: u8) -> Result<Settings, String> {
     store.update(|s| s.retries = retries.min(MAX_RETRIES))
 }
@@ -461,6 +469,7 @@ async fn save_recording<R: tauri::Runtime>(
         ffmpeg: settings.ffmpeg,
         retries: settings.retries.min(MAX_RETRIES),
         prefix: batch_prefix(request.prefix, request.index),
+        resume: settings.resume,
     };
     let notify = |value| {
         if progress.send(value).is_err() {
@@ -569,6 +578,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
             set_theme,
             set_retries,
             set_batch,
+            set_resume,
             downloaded,
             open_link_list,
             choose_folder,
@@ -655,6 +665,7 @@ mod tests {
     fn old_settings_files_get_batch_defaults() {
         let settings: Settings = serde_json::from_str(r#"{"retries":1}"#).unwrap();
         assert_eq!((settings.concurrency, settings.batch_delay_secs, settings.skip_downloaded), (2, 5, true));
+        assert!(settings.resume);
     }
 
     #[test]

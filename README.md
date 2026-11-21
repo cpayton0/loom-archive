@@ -47,7 +47,7 @@ Downloads follow [EcomGraduates/loom-downloader](https://github.com/EcomGraduate
 
 HLS downloads need FFmpeg on PATH or beside the Loom Archive executable. Playlist hosts are limited to Loom's media hosts, and FFmpeg is restricted to the `https`, `tls`, `tcp` and `crypto` protocols. An FFmpeg HTTP 401, 403 or 404 response is reported as a typed error.
 
-The app writes a temporary file beside the destination, checks its container and video samples, then saves it as `<recording-id>.mp4`. Existing files are preserved. Canceled or failed downloads discard their temporary file. Retrying starts a new transfer.
+The app writes a temporary file beside the destination, checks its container and video samples, then saves it under the chosen name. Existing files are preserved. With **Resume interrupted downloads** on (Settings → Advanced, the default, like upstream's `--resume`), a direct MP4 whose connection drops is kept as `.loom-<id>.mp4.part`; the next attempt (an automatic retry or a later download of the same recording to the same folder) asks for the remaining bytes with an HTTP `Range` request and appends them only when the server answers with a matching `Content-Range`, otherwise it starts over. Canceled downloads and files that fail verification are deleted. HLS downloads always restart because FFmpeg reads the playlist from the beginning.
 
 The offline tests include an original one-second MP4 fixture. To run the opt-in live check, put FFmpeg on PATH, set `LOOM_TEST_SHARE_URL` to a recording you control and run `cargo test -p loom-core --test live_download -- --ignored --nocapture`. Media from a successful test is saved in a temporary directory.
 

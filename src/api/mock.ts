@@ -5,7 +5,7 @@ import type { AppInfo, DownloadRequest, SaveResult, Settings, TransferProgress, 
 let settings: Settings = {
   theme: "dark",
   folder: "C:\\Users\\you\\Videos\\Loom Archive\\Customer calls\\2026",
-  ffmpeg: null, retries: 1, concurrency: 2, batchDelaySecs: 1, skipDownloaded: true,
+  ffmpeg: null, retries: 1, concurrency: 2, batchDelaySecs: 1, skipDownloaded: true, resume: true,
   naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, captions: false, gif: false, seekPreview: false, collision: "stop",
 };
 let override: string | null = null;
@@ -49,6 +49,7 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         if (args.job == null) active.forEach(j => canceled.add(j)); else canceled.add(Number(args.job));
         return null;
       case "pin_download_folder": return (override = override ?? settings.folder);
+      case "set_resume": return (settings = { ...settings, resume: Boolean(args.resume) });
       case "set_retries": return (settings = { ...settings, retries: Number(args.retries) });
       case "choose_folder": return (settings = { ...settings, folder: "D:\\Archive\\Loom" });
       case "ask_each_time": return (settings = { ...settings, folder: null });

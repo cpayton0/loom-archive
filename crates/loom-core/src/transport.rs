@@ -162,13 +162,26 @@ pub(crate) fn checked_media_host(url: &Url) -> Result<&'static str, AnalyzeError
     }
 }
 
-pub(crate) async fn fetch_media(url: Url) -> Result<reqwest::Response, AnalyzeError> {
-    let response = pinned_client(checked_media_host(&url)?)
-        .await?
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| AnalyzeError::Network)?;
+/// GET a media file, asking for the bytes from `offset` on when resuming.
+/// With an offset, `206 Partial Content` and `416 Range Not Satisfiable` are
+/// returned to the caller to decide; everything else is validated as usual.
+pub(crate) async fn fetch_media_from(
+    url: Url,
+    offset: u64,
+) -> Result<reqwest::Response, AnalyzeError> {
+    let mut request = pinned_client(checked_media_host(&url)?).await?.get(url);
+    if offset > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+    }
+    let response = request.send().await.map_err(|_| AnalyzeError::Network)?;
+    if offset > 0
+        && matches!(
+            response.status(),
+            StatusCode::PARTIAL_CONTENT | StatusCode::RANGE_NOT_SATISFIABLE
+        )
+    {
+        return Ok(response);
+    }
     validate_media_response(response).await
 }
 

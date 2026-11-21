@@ -3,7 +3,7 @@ use crate::{
     hls::find_ffmpeg, normalize_share_url,
     options::sanitize_filename,
     page::MediaSource,
-    transport::{fetch_asset, fetch_media, read_limited, resolve_recording, seek_preview_vtt},
+    transport::{fetch_asset, fetch_media_from, read_limited, resolve_recording, seek_preview_vtt},
 };
 use mp4::{Mp4Reader, TrackType};
 use serde::Serialize;
@@ -156,6 +156,9 @@ pub struct SaveRequest {
     pub retries: u8,
     /// Batch numbering, upstream's `--prefix`: files become `<prefix>-<n>-<name>`.
     pub prefix: Option<(String, usize)>,
+    /// Keep an interrupted direct-MP4 download and continue it with an HTTP
+    /// range request (upstream `--resume`). HLS downloads always restart.
+    pub resume: bool,
 }
 
 fn custom_base(name: &str) -> Result<String, SaveError> {
@@ -258,6 +261,7 @@ impl Plan {
 
 async fn save_media(
     request: &SaveRequest,
+    id: &str,
     duration: Option<f64>,
     media: &MediaSource,
     path: &Path,
@@ -288,9 +292,7 @@ async fn save_media(
             crate::hls::save_with(&exe()?, &job, Expect::Audio, path, cancel, progress).await?;
         }
         MediaSource::Mp4(url) => {
-            let response =
-                cancelable(cancel, async { Ok(fetch_media(url.clone()).await?) }).await?;
-            save_response(response, path, cancel, progress).await?;
+            save_direct(url, path, id, request.resume, cancel, progress).await?;
             if options.quality.max_height().is_some() {
                 return Ok(Some(
                     "Quality applies to HLS streams. This page offered a single MP4, which was saved as is."
@@ -359,7 +361,7 @@ pub async fn save_recording(
         let media = page.media?;
         let duration = page.video.duration_seconds;
         let (result, attempt) = with_retries(request.retries, cancel, || {
-            save_media(request, duration, &media, &path, cancel, &progress)
+            save_media(request, &page.video.id, duration, &media, &path, cancel, &progress)
         })
         .await;
         let note = result?;
@@ -583,22 +585,107 @@ fn persist(temp: tempfile::TempPath, dest: &Path) -> Result<(), SaveError> {
         })
 }
 
-async fn save_response(
-    mut response: reqwest::Response,
+/// A direct download's on-disk bytes: where they go, where this response
+/// starts, and whether to keep them when the connection drops.
+struct Partial {
+    path: PathBuf,
+    start: u64,
+    keep: bool,
+}
+
+/// The hidden file an interrupted direct download is kept in. It is named
+/// after the recording, so a later attempt finds it under any file name.
+fn partial_path(dest: &Path, id: &str) -> PathBuf {
+    dest.with_file_name(format!(".loom-{id}.mp4.part"))
+}
+
+/// `Content-Range: bytes <start>-<end>/<total>` → (start, end, total).
+fn content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total) = (start.parse().ok()?, end.parse().ok()?, total.parse().ok()?);
+    (start <= end && end < total).then_some((start, end, total))
+}
+
+/// Where a response continues the partial file: `Some((start, total))` to
+/// append, `Some((0, length))` for a full body, `None` when it cannot be used
+/// and the download must start over.
+fn resume_point(
+    have: u64,
+    status: reqwest::StatusCode,
+    range: Option<&str>,
+    length: Option<u64>,
+) -> Option<(u64, Option<u64>)> {
+    match status.as_u16() {
+        206 => {
+            let (start, end, total) = content_range(range?)?;
+            (have > 0 && start == have && end + 1 == total).then_some((start, Some(total)))
+        }
+        200 => Some((0, length)),
+        _ => None,
+    }
+}
+
+/// Direct MP4 with upstream-style resume: continue `.loom-<id>.mp4.part`
+/// from its size when the server honours the range, otherwise start over.
+async fn save_direct(
+    url: &Url,
     dest: &Path,
+    id: &str,
+    resume: bool,
     cancel: &CancellationToken,
     progress: &impl Fn(TransferProgress),
 ) -> Result<(), SaveError> {
-    let dir = dest.parent().ok_or(SaveError::Storage)?;
-    let temp = tempfile::Builder::new()
-        .prefix(".loom-")
-        .suffix(".part")
-        .tempfile_in(dir)
-        .map_err(|_| SaveError::Storage)?;
-    let (file, temp_path) = temp.into_parts();
-    let mut out = tokio::fs::File::from_std(file);
-    let total = response.content_length();
-    let mut bytes = 0;
+    let part = partial_path(dest, id);
+    let have = match resume {
+        true => tokio::fs::metadata(&part).await.map_or(0, |m| m.len()),
+        false => {
+            let _ = tokio::fs::remove_file(&part).await;
+            0
+        }
+    };
+    let fetch = |offset| cancelable(cancel, async move { Ok(fetch_media_from(url.clone(), offset).await?) });
+    let response = fetch(have).await?;
+    let header = |r: &reqwest::Response, name| {
+        r.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from)
+    };
+    let range = header(&response, reqwest::header::CONTENT_RANGE);
+    let decision = resume_point(have, response.status(), range.as_deref(), response.content_length());
+    let (response, start, total) = match decision {
+        Some((start, total)) => (response, start, total),
+        None => {
+            // Unusable range reply (for example 416 for a stale file): start over.
+            drop(response);
+            let _ = tokio::fs::remove_file(&part).await;
+            let response = fetch(0).await?;
+            let total = response.content_length();
+            (response, 0, total)
+        }
+    };
+    let partial = Partial {
+        path: part,
+        start,
+        keep: resume,
+    };
+    save_response(response, dest, &partial, total, cancel, progress).await
+}
+
+async fn save_response(
+    mut response: reqwest::Response,
+    dest: &Path,
+    partial: &Partial,
+    total: Option<u64>,
+    cancel: &CancellationToken,
+    progress: &impl Fn(TransferProgress),
+) -> Result<(), SaveError> {
+    let discard = || async { let _ = tokio::fs::remove_file(&partial.path).await; };
+    let opened = if partial.start == 0 {
+        tokio::fs::File::create(&partial.path).await
+    } else {
+        tokio::fs::OpenOptions::new().append(true).open(&partial.path).await
+    };
+    let mut out = opened.map_err(|_| SaveError::Storage)?;
+    let mut bytes = partial.start;
     let mut last = Instant::now();
     progress(TransferProgress {
         bytes,
@@ -609,13 +696,30 @@ async fn save_response(
     loop {
         let chunk = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Err(SaveError::Canceled),
-            result = response.chunk() => result.map_err(|_| SaveError::Interrupted)?,
+            _ = cancel.cancelled() => {
+                drop(out);
+                discard().await;
+                return Err(SaveError::Canceled);
+            }
+            result = response.chunk() => match result {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    // Keep what arrived so the next attempt can continue it.
+                    let _ = out.flush().await;
+                    drop(out);
+                    if !partial.keep {
+                        discard().await;
+                    }
+                    return Err(SaveError::Interrupted);
+                }
+            },
         };
         let Some(chunk) = chunk else { break };
-        out.write_all(&chunk)
-            .await
-            .map_err(|_| SaveError::Storage)?;
+        if out.write_all(&chunk).await.is_err() {
+            drop(out);
+            discard().await;
+            return Err(SaveError::Storage);
+        }
         bytes += chunk.len() as u64;
         if last.elapsed() >= Duration::from_millis(150) {
             progress(TransferProgress {
@@ -627,19 +731,37 @@ async fn save_response(
             last = Instant::now();
         }
     }
+    let synced = async {
+        out.flush().await?;
+        out.sync_all().await
+    }
+    .await;
+    drop(out);
+    if synced.is_err() {
+        discard().await;
+        return Err(SaveError::Storage);
+    }
     if bytes == 0 || total.is_some_and(|expected| expected != bytes) {
+        discard().await;
         return Err(SaveError::InvalidMedia);
     }
-    out.flush().await.map_err(|_| SaveError::Storage)?;
-    out.sync_all().await.map_err(|_| SaveError::Storage)?;
-    drop(out);
     progress(TransferProgress {
         bytes,
         total,
         percent: None,
         finalizing: true,
     });
-    finish(temp_path, dest, bytes, cancel, Expect::Video).await
+    // From here the partial is complete: verification failure or a name
+    // collision deletes it (TempPath), success moves it into place.
+    let complete = tempfile::TempPath::try_from_path(&partial.path).map_err(|_| SaveError::Storage)?;
+    finish(
+        complete,
+        dest,
+        bytes,
+        cancel,
+        Expect::Video,
+    )
+    .await
 }
 
 pub(crate) async fn finish(
@@ -909,6 +1031,92 @@ mod tests {
             .body(reqwest::Body::from(data))
             .unwrap()
             .into()
+    }
+
+    /// Writes a whole body as a fresh, non-resumable download.
+    async fn save_response(
+        response: reqwest::Response,
+        dest: &Path,
+        cancel: &CancellationToken,
+        progress: &impl Fn(TransferProgress),
+    ) -> Result<(), SaveError> {
+        let total = response.content_length();
+        let partial = Partial {
+            path: dest.with_file_name(".test.part"),
+            start: 0,
+            keep: false,
+        };
+        super::save_response(response, dest, &partial, total, cancel, progress).await
+    }
+
+    /// A body that yields `data` and then fails like a dropped connection.
+    fn cut_off(data: &'static [u8]) -> reqwest::Response {
+        let chunks: Vec<Result<&'static [u8], std::io::Error>> =
+            vec![Ok(data), Err(std::io::Error::other("connection reset"))];
+        http::Response::builder()
+            .body(reqwest::Body::wrap_stream(futures_util::stream::iter(chunks)))
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn range_replies_continue_only_where_the_file_stopped() {
+        use reqwest::StatusCode as S;
+        let ok = Some("bytes 100-199/200");
+        assert_eq!(resume_point(100, S::PARTIAL_CONTENT, ok, Some(100)), Some((100, Some(200))));
+        assert_eq!(resume_point(100, S::OK, None, Some(200)), Some((0, Some(200))));
+        for (have, range) in [
+            (90, ok),                              // starts elsewhere
+            (100, Some("bytes 100-150/200")),      // does not reach the end
+            (100, Some("bytes 100-199/*")),        // unknown total
+            (100, Some("items 100-199/200")),      // wrong unit
+            (100, None),                           // missing header
+            (0, Some("bytes 0-199/200")),          // nothing to continue
+        ] {
+            assert_eq!(resume_point(have, S::PARTIAL_CONTENT, range, None), None, "{range:?}");
+        }
+        assert_eq!(resume_point(100, S::RANGE_NOT_SATISFIABLE, Some("bytes */50"), None), None);
+        assert_eq!(content_range("bytes 0-0/1"), Some((0, 0, 1)));
+        assert_eq!(content_range("bytes 5-4/10"), None);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_download_continues_from_its_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("rec.mp4");
+        let token = CancellationToken::new();
+        let id = "0123456789abcdef0123456789abcdef";
+        let part = partial_path(&dest, id);
+        let half = VIDEO.len() / 2;
+        let keep = Partial { path: part.clone(), start: 0, keep: true };
+        let first = super::save_response(cut_off(&VIDEO[..half]), &dest, &keep, Some(VIDEO.len() as u64), &token, &|_| {}).await;
+        assert!(matches!(first, Err(SaveError::Interrupted)));
+        assert_eq!(std::fs::read(&part).unwrap(), &VIDEO[..half]);
+        assert!(!dest.exists());
+
+        let rest = Partial { path: part.clone(), start: half as u64, keep: true };
+        let seen = std::cell::Cell::new(0);
+        super::save_response(response(&VIDEO[half..]), &dest, &rest, Some(VIDEO.len() as u64), &token,
+            &|p: TransferProgress| seen.set(p.bytes)).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), VIDEO);
+        assert_eq!(seen.get(), VIDEO.len() as u64);
+        assert!(!part.exists());
+    }
+
+    #[tokio::test]
+    async fn partial_files_are_dropped_when_resume_is_off_or_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("rec.mp4");
+        let token = CancellationToken::new();
+        let part = partial_path(&dest, "a");
+        let off = Partial { path: part.clone(), start: 0, keep: false };
+        let result = super::save_response(cut_off(&VIDEO[..10]), &dest, &off, None, &token, &|_| {}).await;
+        assert!(matches!(result, Err(SaveError::Interrupted)) && !part.exists());
+
+        let on = Partial { path: part.clone(), start: 0, keep: true };
+        let result = super::save_response(response(VIDEO), &dest, &on, None, &token, &|_| token.cancel()).await;
+        assert!(matches!(result, Err(SaveError::Canceled)) && !part.exists());
+        assert_eq!(dir.path().read_dir().unwrap().count(), 0);
     }
     #[tokio::test]
     async fn saves_verified_video_and_never_replaces_a_destination() {

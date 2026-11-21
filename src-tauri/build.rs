@@ -6,6 +6,7 @@ fn main() {
         "set_theme",
         "set_retries",
         "set_batch",
+        "set_resume",
         "downloaded",
         "open_link_list",
         "choose_folder",
