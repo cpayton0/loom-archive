@@ -27,13 +27,30 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
+    "resources": {
+      "../THIRD-PARTY-NOTICES.md": "licenses/THIRD-PARTY-NOTICES.md",
+      "../LICENSES/FFmpeg-LGPL-3.0.txt": "licenses/FFmpeg-LGPL-3.0.txt",
+      "../LICENSES/GPL-3.0.txt": "licenses/GPL-3.0.txt",
+      "../LICENSES/EcomGraduates-MIT.txt": "licenses/EcomGraduates-MIT.txt",
+      "../LICENSES/RobertoMoreno-MIT.txt": "licenses/RobertoMoreno-MIT.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

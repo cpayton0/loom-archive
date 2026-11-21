@@ -35,7 +35,7 @@ const tabClass = "data-[state=active]:border-primary/70 data-[state=active]:bg-p
 const licenses: [string, string, string][] = [
   ["EcomGraduates/loom-downloader", "MIT", "Download flow this app follows"],
   ["robertoamoreno/loom_com_backup", "MIT", "Reference for recording metadata"],
-  ["FFmpeg", "LGPL/GPL", "Run as a separate program to combine streams; not bundled"],
+  ["FFmpeg 9.0.2 (BtbN build)", "LGPL v3+", "Bundled; run as a separate program to combine streams"],
   ["Tauri", "MIT / Apache-2.0", "Desktop runtime"],
   ["React", "MIT", "Interface library"],
   ["shadcn/ui and Radix UI", "MIT", "Interface components"],
@@ -130,14 +130,14 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
       </TabsContent>
 
       <TabsContent value="advanced" className="divide-y">
-        <SettingRow title="FFmpeg" description="Needed for HLS streams and audio-only downloads.">
+        <SettingRow title="FFmpeg" description="Needed for HLS streams and audio-only downloads. The installer includes it; choose another ffmpeg.exe to use your own.">
           <div className="grid gap-2">
             <p className="flex items-center gap-1.5 text-xs">
               {info?.ffmpeg ? <><CheckCircle2 className="size-3.5 text-success" aria-hidden="true" /> Found</>
                 : <><TriangleAlert className="size-3.5 text-destructive" aria-hidden="true" /> Not found</>}
               <span className="text-muted-foreground">· {settings.ffmpeg ? "Custom location" : "Automatic (beside the app, then PATH)"}</span>
             </p>
-            <PathBox path={info?.ffmpeg ?? null} empty="Install FFmpeg or choose ffmpeg.exe" />
+            <PathBox path={info?.ffmpeg ?? null} empty="Not found. Reinstall Loom Archive or choose ffmpeg.exe" />
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={() => apply(chooseFfmpeg())}>Choose ffmpeg.exe…</Button>
               {settings.ffmpeg && <Button variant="ghost" size="sm" onClick={() => apply(autoFfmpeg())}>
@@ -214,7 +214,7 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
               <span className="shrink-0 text-xs text-muted-foreground">{license}</span>
             </li>)}
           </ul>
-          <p className="text-xs text-muted-foreground">License texts for the Loom projects are in the LICENSES folder of the source repository.</p>
+          <p className="text-xs text-muted-foreground">License texts and source locations are in the licenses folder next to the app and in THIRD-PARTY-NOTICES.md in the source repository.</p>
         </div>
       </TabsContent>
     </Tabs>

@@ -478,10 +478,21 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "{args:?}");
         };
+        // H.264 like Loom's streams: libopenh264 in LGPL builds (such as the
+        // bundled one), libx264 in GPL builds.
+        let encoders = std::process::Command::new(&exe)
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .unwrap();
+        let encoders = String::from_utf8_lossy(&encoders.stdout);
+        let h264 = ["libopenh264", "libx264"]
+            .into_iter()
+            .find(|e| encoders.contains(&format!(" {e} ")))
+            .expect("an H.264 encoder");
         ffmpeg(&[
             "-f", "lavfi", "-i", "testsrc=size=160x90:rate=10:duration=3",
             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-            "-c:v", "libx264", "-g", "10", "-c:a", "aac", "-shortest", "src.mp4",
+            "-c:v", h264, "-g", "10", "-c:a", "aac", "-shortest", "src.mp4",
         ]);
         for track in ["v", "a"] {
             let segments = format!("{track}%03d.ts");

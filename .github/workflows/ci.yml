@@ -13,6 +13,19 @@ jobs:
       - run: npm install --global pnpm@11.24.0
       - run: rustup update stable
       - run: pnpm install --frozen-lockfile
+      - name: Fetch the pinned LGPL FFmpeg
+        run: pnpm fetch-ffmpeg
       - run: cargo fetch --locked
-      - run: cargo test --workspace --locked --offline
-      - run: pnpm tauri build --no-bundle
+      - name: Test, including FFmpeg tests against the bundled build
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\src-tauri\binaries;$env:PATH"
+          Copy-Item src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe src-tauri\binaries\ffmpeg.exe -Force
+          cargo test --workspace --locked --offline -- --include-ignored --skip live_share
+      - name: Build the installer
+        run: pnpm tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loom-archive-installer
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
