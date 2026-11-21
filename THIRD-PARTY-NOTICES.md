@@ -7,9 +7,10 @@ Loom Archive ships with or is derived from the following software. The license t
 - **What:** the `ffmpeg.exe` program installed next to `loom-archive.exe`. Loom Archive runs it as a separate program to download HLS streams and save MP4/M4A files. It is not linked into Loom Archive.
 - **Version:** FFmpeg `n9.0.2-61-gd59078794d`, built 2026-11-20 by [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (release `autobuild-2026-11-20-12-40`, file `ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-9.0.zip`, SHA-256 `814c62c35ca7e2b15d85b0a2a5b79bbf21783176520154f26a6df1e9df72761e`).
 - **License:** GNU Lesser General Public License version 3 or later (`LICENSES/FFmpeg-LGPL-3.0.txt`). LGPL v3 adds permissions on top of the GNU General Public License version 3, which is included as `LICENSES/GPL-3.0.txt`. The build uses no GPL-only or non-free components (no `--enable-gpl`, no `--enable-nonfree`).
-- **Source code:** FFmpeg is © the FFmpeg developers, <https://ffmpeg.org>.
-  - **FFmpeg source:** commit `d59078794d` of <https://git.ffmpeg.org/ffmpeg.git>, also mirrored at <https://github.com/FFmpeg/FFmpeg/commit/d59078794d>.
-  - **Build scripts:** BtbN's scripts that produced this binary, including the configuration and the exact versions of the libraries it links, are at <https://github.com/BtbN/FFmpeg-Builds>.
+- **Source code:** FFmpeg is © the FFmpeg developers, <https://ffmpeg.org>. The binary, its source and its build scripts are kept together on the release [`ffmpeg-n9.0.2-61-gd59078794d`](https://github.com/cpayton0/loom-archive/releases/tag/ffmpeg-n9.0.2-61-gd59078794d) of this repository:
+  - **FFmpeg source:** `ffmpeg-source-d59078794d80f5256d5def27e10bb5400a13195c.tar.gz`, commit `d59078794d80f5256d5def27e10bb5400a13195c` of <https://git.ffmpeg.org/ffmpeg.git> (also at <https://github.com/FFmpeg/FFmpeg/commit/d59078794d80f5256d5def27e10bb5400a13195c>).
+  - **Build scripts:** `FFmpeg-Builds-scripts-7f2a6b1050d302144de8366afa37a75e46f326aa.tar.gz`, BtbN's build scripts at commit `7f2a6b1` (<https://github.com/BtbN/FFmpeg-Builds/commit/7f2a6b1050d302144de8366afa37a75e46f326aa>). These are the scripts that produced this binary, with its configuration and the exact versions of the libraries it links.
+  - **Binary:** `ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-9.0.zip`, an unmodified copy of BtbN's download.
   - **Questions:** if any of these locations stops working, please open an issue at <https://github.com/cpayton0/loom-archive/issues>.
 - **Replacing it:** you can use a different FFmpeg under **Settings → Advanced → FFmpeg → Choose ffmpeg.exe…**, or replace the installed `ffmpeg.exe`.
 

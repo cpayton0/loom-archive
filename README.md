@@ -34,7 +34,7 @@ cargo test
 pnpm tauri dev
 ```
 
-`pnpm fetch-ffmpeg` runs `scripts/fetch-ffmpeg.ps1`, which downloads the pinned build, checks its SHA-256, refuses builds configured with `--enable-gpl` or `--enable-nonfree`, and checks for the `https`, `tls` and `crypto` protocols. Tauri needs that file to build the app, including for `cargo test`.
+`pnpm fetch-ffmpeg` runs `scripts/fetch-ffmpeg.ps1`, which downloads the pinned build from the [`ffmpeg-n9.0.2-61-gd59078794d`](https://github.com/cpayton0/loom-archive/releases/tag/ffmpeg-n9.0.2-61-gd59078794d) mirror release (which also holds its source; BtbN is the fallback), checks its SHA-256, refuses builds configured with `--enable-gpl` or `--enable-nonfree`, and checks for the `https`, `tls` and `crypto` protocols. Tauri needs that file to build the app, including for `cargo test`.
 
 To build the installer, run `pnpm tauri build`. It writes `target/release/bundle/nsis/Loom Archive_<version>_x64-setup.exe`, a per-user installer that places `loom-archive.exe`, `ffmpeg.exe` and the license texts in the install folder. `pnpm tauri build --no-bundle` builds only `target/release/loom-archive.exe` (with `ffmpeg.exe` copied beside it). The frontend assets are embedded in the executable. Node.js and pnpm are development tools.
 

@@ -3,7 +3,9 @@
   Downloads the pinned LGPL FFmpeg build that ships with Loom Archive.
 
 .DESCRIPTION
-  Fetches BtbN's static win64 LGPL build, checks its SHA-256, and places
+  Fetches BtbN's static win64 LGPL build from this repository's mirror
+  release (falling back to BtbN, which prunes old builds), checks its
+  SHA-256, and places
   ffmpeg.exe where Tauri's externalBin expects it:
   src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
 
@@ -22,10 +24,15 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Release = 'autobuild-2026-11-20-12-40'
 $Asset = 'ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-9.0.zip'
 $ZipSha256 = '814c62c35ca7e2b15d85b0a2a5b79bbf21783176520154f26a6df1e9df72761e'
-if (-not $Url) { $Url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$Release/$Asset" }
+# The mirror also holds this build's FFmpeg source and BtbN build scripts.
+$Sources = if ($Url) { @($Url) } else {
+  @(
+    "https://github.com/cpayton0/loom-archive/releases/download/ffmpeg-n9.0.2-61-gd59078794d/$Asset",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-20-12-40/$Asset"
+  )
+}
 
 $Root = Split-Path -Parent $PSScriptRoot
 $BinDir = Join-Path $Root 'src-tauri\binaries'
@@ -46,9 +53,19 @@ $Work = Join-Path ([System.IO.Path]::GetTempPath()) ("loom-ffmpeg-" + [guid]::Ne
 New-Item -ItemType Directory -Path $Work | Out-Null
 try {
   $Zip = Join-Path $Work $Asset
-  Write-Host "Downloading $Url"
   $ProgressPreference = 'SilentlyContinue'
-  Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing
+  $downloaded = $false
+  foreach ($source in $Sources) {
+    try {
+      Write-Host "Downloading $source"
+      Invoke-WebRequest -Uri $source -OutFile $Zip -UseBasicParsing
+      $downloaded = $true
+      break
+    } catch {
+      Write-Warning "Download failed: $($_.Exception.Message)"
+    }
+  }
+  if (-not $downloaded) { throw "Could not download $Asset from any source." }
 
   $hash = (Get-FileHash $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($hash -ne $ZipSha256) {
