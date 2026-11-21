@@ -14,6 +14,7 @@ fn main() {
         "auto_ffmpeg",
         "app_info",
         "choose_download_folder",
+        "pin_download_folder",
         "clear_download_folder",
         "save_recording",
         "cancel_save",

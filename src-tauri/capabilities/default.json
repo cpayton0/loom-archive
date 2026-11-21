@@ -19,6 +19,7 @@
     "allow-auto-ffmpeg",
     "allow-app-info",
     "allow-choose-download-folder",
+    "allow-pin-download-folder",
     "allow-clear-download-folder",
     "allow-save-recording",
     "allow-cancel-save",

@@ -168,6 +168,34 @@ fn custom_base(name: &str) -> Result<String, SaveError> {
     sanitize_filename(stem).ok_or(SaveError::InvalidFileName)
 }
 
+/// Longest base name, leaving room for the longest suffix (`-seek-preview.jpg`,
+/// `.transcript.json`) and a ` (999)` collision number within NTFS's 255.
+const MAX_BASE: usize = 200;
+const MAX_PREFIX: usize = 60;
+
+/// The name every file of a download starts with: the custom name, or the
+/// title or ID per the naming setting, then the batch `<prefix>-<n>-` on top.
+fn file_base(
+    video: &crate::VideoDescriptor,
+    custom: Option<String>,
+    request: &SaveRequest,
+) -> Result<String, SaveError> {
+    let base = custom.unwrap_or_else(|| match request.options.naming {
+        FileNaming::Title => video.title_file_name.clone().unwrap_or_else(|| video.id.clone()),
+        FileNaming::Id => video.id.clone(),
+    });
+    let base = match &request.prefix {
+        Some((prefix, n)) => {
+            let prefix: String = prefix.chars().take(MAX_PREFIX).collect();
+            let prefix = sanitize_filename(&prefix).ok_or(SaveError::InvalidFileName)?;
+            format!("{prefix}-{n}-{base}")
+        }
+        None => base,
+    };
+    let capped: String = base.chars().take(MAX_BASE).collect();
+    Ok(capped.trim_end_matches(['.', ' ']).to_string())
+}
+
 struct Plan {
     media: Option<PathBuf>,
     transcript: Option<PathBuf>,
@@ -294,21 +322,7 @@ pub async fn save_recording(
         Ok(resolve_recording(canonical.as_str()).await?)
     })
     .await?;
-    let base = custom.unwrap_or_else(|| match options.naming {
-        FileNaming::Title => page
-            .video
-            .title_file_name
-            .clone()
-            .unwrap_or_else(|| page.video.id.clone()),
-        FileNaming::Id => page.video.id.clone(),
-    });
-    let base = match &request.prefix {
-        Some((prefix, n)) => {
-            let prefix = sanitize_filename(prefix).ok_or(SaveError::InvalidFileName)?;
-            format!("{prefix}-{n}-{base}")
-        }
-        None => base,
-    };
+    let base = file_base(&page.video, custom, request)?;
     // Captions the page does not list are dropped up front, so a leftover
     // `.captions.vtt` cannot cause a collision for a file that won't be written.
     let mut early_notes = Vec::new();
@@ -842,6 +856,41 @@ mod tests {
     fn retries_back_off_exponentially_with_a_cap() {
         let waits: Vec<_> = (0..8).map(|a| retry_delay(a).as_secs()).collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
+    }
+
+    #[test]
+    fn batch_prefix_names_files_and_stays_within_windows_limits() {
+        let video = crate::VideoDescriptor {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            title: Some("Demo".into()),
+            title_file_name: Some("Demo".into()),
+            duration_seconds: None,
+            source_url: String::new(),
+            source_type: crate::SourceType::Hls,
+            assets: Default::default(),
+        };
+        let mut request = SaveRequest {
+            options: SaveOptions { naming: FileNaming::Title, ..SaveOptions::default() },
+            prefix: Some(("onboarding".into(), 3)),
+            ..SaveRequest::default()
+        };
+        assert_eq!(file_base(&video, None, &request).unwrap(), "onboarding-3-Demo");
+        assert_eq!(file_base(&video, Some("Custom".into()), &request).unwrap(), "onboarding-3-Custom");
+        request.prefix = Some(("a:b".into(), 1));
+        assert_eq!(file_base(&video, None, &request).unwrap(), "a-b-1-Demo");
+        request.prefix = Some(("CON".into(), 1));
+        assert!(matches!(file_base(&video, None, &request), Err(SaveError::InvalidFileName)));
+        request.prefix = None;
+        request.options.naming = FileNaming::Id;
+        assert_eq!(file_base(&video, None, &request).unwrap(), video.id);
+        // A 60+ character prefix and a 200-character title stay within the cap.
+        let long = crate::VideoDescriptor { title_file_name: Some("t".repeat(200)), ..video };
+        request.options.naming = FileNaming::Title;
+        request.prefix = Some(("p".repeat(300), 1000));
+        let base = file_base(&long, None, &request).unwrap();
+        assert_eq!(base.chars().count(), MAX_BASE);
+        assert!(base.starts_with(&format!("{}-1000-", "p".repeat(MAX_PREFIX))));
+        assert!(base.len() + "-seek-preview.jpg".len() + " (999)".len() <= 255);
     }
 
     #[test]

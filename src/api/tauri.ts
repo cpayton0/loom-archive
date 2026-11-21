@@ -76,6 +76,8 @@ export const autoFfmpeg = () => call<Settings>("auto_ffmpeg");
 export const appInfo = () => call<AppInfo>("app_info");
 /** Picks a folder for the current download only; returns the active override. */
 export const chooseDownloadFolder = () => call<string | null>("choose_download_folder");
+/** Fixes a batch's destination to the current override or default; null when neither is set. */
+export const pinDownloadFolder = () => call<string | null>("pin_download_folder");
 export const clearDownloadFolder = () => call<void>("clear_download_folder");
 /** Cancels one job, or every running download when no job is given. */
 export const cancelSave = (job?: number) => call<void>("cancel_save", { job: job ?? null });

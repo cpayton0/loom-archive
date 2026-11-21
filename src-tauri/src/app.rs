@@ -73,6 +73,22 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Brings hand-edited or old values back into the supported ranges.
+    fn normalized(mut self) -> Self {
+        let (c, d, skip) = (self.concurrency, self.batch_delay_secs, self.skip_downloaded);
+        apply_batch(&mut self, c, d, skip);
+        self.retries = self.retries.min(MAX_RETRIES);
+        self
+    }
+}
+
+fn apply_batch(s: &mut Settings, concurrency: u8, delay_secs: u16, skip_downloaded: bool) {
+    s.concurrency = concurrency.clamp(1, MAX_CONCURRENCY);
+    s.batch_delay_secs = delay_secs.min(MAX_BATCH_DELAY);
+    s.skip_downloaded = skip_downloaded;
+}
+
 const MAX_RETRIES: u8 = 3;
 const MAX_CONCURRENCY: u8 = 5;
 const MAX_BATCH_DELAY: u16 = 600;
@@ -87,8 +103,9 @@ impl SettingsStore {
         let current = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+            .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
+            .unwrap_or_default()
+            .normalized();
         Self {
             path,
             current: Mutex::new(current),
@@ -166,11 +183,7 @@ fn set_batch(
     delay_secs: u16,
     skip_downloaded: bool,
 ) -> Result<Settings, String> {
-    store.update(|s| {
-        s.concurrency = concurrency.clamp(1, MAX_CONCURRENCY);
-        s.batch_delay_secs = delay_secs.min(MAX_BATCH_DELAY);
-        s.skip_downloaded = skip_downloaded;
-    })
+    store.update(|s| apply_batch(s, concurrency, delay_secs, skip_downloaded))
 }
 
 /// IDs of recordings saved before, appended to `downloaded.log` like upstream.
@@ -220,6 +233,10 @@ impl History {
 /// Links that are not valid share links report `false`.
 #[tauri::command]
 fn downloaded(history: State<'_, History>, urls: Vec<String>) -> Vec<bool> {
+    downloaded_flags(&history, &urls)
+}
+
+fn downloaded_flags(history: &History, urls: &[String]) -> Vec<bool> {
     urls.iter()
         .map(|url| {
             loom_core::normalize_share_url(url)
@@ -354,6 +371,23 @@ async fn choose_download_folder<R: tauri::Runtime>(
     Ok(slot.as_ref().map(|p| p.display().to_string()))
 }
 
+/// Fixes the destination for a batch: keeps a folder chosen for this
+/// download, otherwise copies the current default, so later changes in
+/// Settings cannot split one batch across folders. Returns the folder, or
+/// `None` when there is no default (the UI then asks once).
+#[tauri::command]
+fn pin_download_folder(
+    folder: State<'_, DownloadFolder>,
+    store: State<'_, SettingsStore>,
+) -> Result<Option<String>, String> {
+    let default = store.get()?.folder;
+    let mut slot = folder.0.lock().map_err(|_| "Folder selection is unavailable.")?;
+    if slot.is_none() {
+        *slot = default;
+    }
+    Ok(slot.as_ref().map(|p| p.display().to_string()))
+}
+
 #[tauri::command]
 fn clear_download_folder(folder: State<'_, DownloadFolder>) -> Result<(), String> {
     *folder.0.lock().map_err(|_| "Folder selection is unavailable.")? = None;
@@ -412,20 +446,7 @@ async fn save_recording<R: tauri::Runtime>(
         .map_err(|_| "Folder selection is unavailable.")?
         .clone();
     let token = CancellationToken::new();
-    {
-        let mut slot = state
-            .0
-            .lock()
-            .map_err(|_| "The download manager is unavailable.")?;
-        if slot.contains_key(&job) {
-            return Err("That download is already running.".into());
-        }
-        if slot.len() >= usize::from(MAX_CONCURRENCY) {
-            return Err("Too many downloads are running. Wait for one to finish.".into());
-        }
-        slot.insert(job, token.clone());
-    }
-    let _active = ActiveSave(state.inner(), job);
+    let _active = state.start(job, token.clone())?;
     let folder = match chosen.or(settings.folder) {
         Some(folder) if folder.is_dir() => folder,
         Some(_) => return Err("The destination folder no longer exists. Choose another.".into()),
@@ -439,10 +460,7 @@ async fn save_recording<R: tauri::Runtime>(
         file_name: request.file_name,
         ffmpeg: settings.ffmpeg,
         retries: settings.retries.min(MAX_RETRIES),
-        prefix: request
-            .prefix
-            .filter(|p| !p.trim().is_empty())
-            .zip(request.index),
+        prefix: batch_prefix(request.prefix, request.index),
     };
     let notify = |value| {
         if progress.send(value).is_err() {
@@ -471,18 +489,45 @@ async fn save_recording<R: tauri::Runtime>(
     }
 }
 
+impl Downloads {
+    /// Registers a running job; the guard unregisters it when dropped.
+    fn start(&self, job: u32, token: CancellationToken) -> Result<ActiveSave<'_>, String> {
+        let mut slot = self
+            .0
+            .lock()
+            .map_err(|_| "The download manager is unavailable.")?;
+        if slot.contains_key(&job) {
+            return Err("That download is already running.".into());
+        }
+        if slot.len() >= usize::from(MAX_CONCURRENCY) {
+            return Err("Too many downloads are running. Wait for one to finish.".into());
+        }
+        slot.insert(job, token);
+        Ok(ActiveSave(self, job))
+    }
+
+    fn cancel(&self, job: Option<u32>) -> Result<(), String> {
+        let active = self
+            .0
+            .lock()
+            .map_err(|_| "The download manager is unavailable.")?;
+        match job {
+            Some(job) => active.get(&job).into_iter().for_each(CancellationToken::cancel),
+            None => active.values().for_each(CancellationToken::cancel),
+        }
+        Ok(())
+    }
+}
+
 /// Cancels one job, or every running download when `job` is omitted.
 #[tauri::command]
 fn cancel_save(state: State<'_, Downloads>, job: Option<u32>) -> Result<(), String> {
-    let active = state
-        .0
-        .lock()
-        .map_err(|_| "The download manager is unavailable.")?;
-    match job {
-        Some(job) => active.get(&job).into_iter().for_each(CancellationToken::cancel),
-        None => active.values().for_each(CancellationToken::cancel),
-    }
-    Ok(())
+    state.cancel(job)
+}
+
+/// Batch numbering from the UI; a blank prefix means no numbering.
+fn batch_prefix(prefix: Option<String>, index: Option<usize>) -> Option<(String, usize)> {
+    prefix.filter(|p| !p.trim().is_empty()).zip(index)
 }
 
 #[tauri::command]
@@ -532,6 +577,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
             auto_ffmpeg,
             app_info,
             choose_download_folder,
+            pin_download_folder,
             clear_download_folder,
             save_recording,
             cancel_save,
@@ -592,6 +638,8 @@ mod tests {
             .unwrap();
         let reloaded = History::load(Some(path.clone()));
         assert!(reloaded.contains(id));
+        assert!(!reloaded.contains("not an id"));
+        assert_eq!(reloaded.ids.lock().unwrap().len(), 1);
         assert_eq!(std::fs::read_to_string(path).unwrap().matches(id).count(), 1);
     }
 
@@ -610,10 +658,66 @@ mod tests {
     }
 
     #[test]
+    fn jobs_are_capped_unique_and_cancelled_individually_or_together() {
+        let downloads = Downloads::default();
+        let tokens: Vec<_> = (0..5).map(|_| CancellationToken::new()).collect();
+        let mut guards: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| downloads.start(i as u32, t.clone()).unwrap())
+            .collect();
+        assert!(downloads.start(9, CancellationToken::new()).is_err(), "cap");
+        drop(guards.pop()); // job 4 finishes
+        assert!(downloads.start(0, CancellationToken::new()).is_err(), "duplicate job");
+        let fifth = downloads.start(4, tokens[4].clone()).unwrap();
+        downloads.cancel(Some(1)).unwrap();
+        assert!(tokens[1].is_cancelled() && !tokens[0].is_cancelled());
+        downloads.cancel(None).unwrap();
+        assert!(tokens.iter().all(CancellationToken::is_cancelled));
+        drop(fifth);
+        assert_eq!(downloads.0.lock().unwrap().len(), 4, "only the dropped guard unregisters");
+        drop(guards);
+        assert!(downloads.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn downloaded_flags_match_any_link_form_of_a_saved_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = History::load(Some(dir.path().join("downloaded.log")));
+        history.record("0123456789ABCDEF0123456789ABCDEF");
+        let urls = [
+            "https://www.loom.com/share/0123456789abcdef0123456789abcdef",
+            "https://loom.com/embed/0123456789ABCDEF0123456789ABCDEF?t=1",
+            "https://www.loom.com/share/Demo-0123456789abcdef0123456789abcdef",
+            "https://www.loom.com/share/fedcba9876543210fedcba9876543210",
+            "not a link",
+        ]
+        .map(String::from);
+        assert_eq!(downloaded_flags(&history, &urls), [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn batch_settings_are_clamped_wherever_they_come_from() {
+        let mut settings = Settings::default();
+        apply_batch(&mut settings, 0, 9999, false);
+        assert_eq!((settings.concurrency, settings.batch_delay_secs, settings.skip_downloaded), (1, MAX_BATCH_DELAY, false));
+        apply_batch(&mut settings, 9, 5, true);
+        assert_eq!(settings.concurrency, MAX_CONCURRENCY);
+        let edited: Settings = serde_json::from_str(r#"{"concurrency":0,"batchDelaySecs":65535,"retries":40}"#).unwrap();
+        let normalized = edited.normalized();
+        assert_eq!((normalized.concurrency, normalized.batch_delay_secs, normalized.retries), (1, MAX_BATCH_DELAY, MAX_RETRIES));
+        assert_eq!(batch_prefix(Some("  ".into()), Some(1)), None);
+        assert_eq!(batch_prefix(Some("demo".into()), None), None);
+        assert_eq!(batch_prefix(Some("demo".into()), Some(2)), Some(("demo".into(), 2)));
+    }
+
+    #[test]
     fn only_the_main_window_can_call_the_analyzer() {
         let app = with_commands(test::mock_builder())
             .build(tauri::generate_context!())
             .unwrap();
+        // The mock app does not run setup; register the state `downloaded` reads.
+        app.manage(History::load(None));
         for label in ["main", "other"] {
             let window = WebviewWindowBuilder::new(&app, label, Default::default())
                 .build()
@@ -643,6 +747,40 @@ mod tests {
                     error.as_str().is_some_and(|s| s.contains("not allowed")),
                     "{error}"
                 );
+            }
+            // Batch commands: granted to the main window only. Only `downloaded`
+            // is invoked from main, because the others write settings or open dialogs.
+            for (cmd, body) in [
+                ("downloaded", json!({"urls": []})),
+                ("set_batch", json!({"concurrency": 1, "delaySecs": 0, "skipDownloaded": true})),
+                ("open_link_list", json!({})),
+                ("pin_download_folder", json!({})),
+            ] {
+                if label == "main" && cmd != "downloaded" {
+                    continue;
+                }
+                let response = test::get_ipc_response(
+                    &window,
+                    InvokeRequest {
+                        cmd: cmd.into(),
+                        callback: CallbackFn(0),
+                        error: CallbackFn(1),
+                        url: tauri::Manager::config(&app)
+                            .build
+                            .dev_url
+                            .clone()
+                            .unwrap_or_else(|| "http://tauri.localhost".parse().unwrap()),
+                        body: body.into(),
+                        headers: Default::default(),
+                        invoke_key: test::INVOKE_KEY.into(),
+                    },
+                );
+                if label == "main" {
+                    assert!(response.is_ok(), "{cmd}: {response:?}");
+                } else {
+                    let error = response.expect_err("other windows are denied");
+                    assert!(error.as_str().is_some_and(|s| s.contains("not allowed")), "{cmd}: {error}");
+                }
             }
         }
     }

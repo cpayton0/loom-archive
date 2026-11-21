@@ -1,6 +1,7 @@
 import { CheckCircle2, CircleDashed, CircleSlash, FileText, Loader2, XCircle } from "lucide-react";
 import {
-  cancelSave, chooseDownloadFolder, downloaded, errorMessage, nextJob, openLinkList, saveRecording,
+  cancelSave, chooseDownloadFolder, clearDownloadFolder, downloaded, errorMessage, nextJob, openLinkList,
+  pinDownloadFolder, saveRecording,
   type SaveOptions, type Settings, type TransferProgress,
 } from "@/api/tauri";
 import { Button } from "@/components/ui/button";
@@ -73,6 +74,9 @@ export async function runBatch(batch: Batch, settings: Settings, options: SaveOp
   const setItem = (job: number, change: Partial<BatchItem>) =>
     update(b => ({ ...b, items: b.items.map(i => i.job === job ? { ...i, ...change } : i) }));
   update(b => ({ ...b, items, running: true, stopping: false, message: "Preparing…" }));
+  // Set when this batch fixed the default folder for itself, so it can be released afterwards.
+  let pinnedDefault = false;
+  let failure: string | null = null;
 
   try {
     const queued = items.filter(i => i.status === "queued");
@@ -88,8 +92,12 @@ export async function runBatch(batch: Batch, settings: Settings, options: SaveOp
       update(b => ({ ...b, running: false, message: `Nothing to download. ${summarize(items)}` }));
       return;
     }
-    if (!folderOverride && !settings.folder) {
-      const folder = await chooseDownloadFolder();
+    // Fix the destination for the whole batch, so changing the default in
+    // Settings meanwhile cannot split it across folders or prompt per item.
+    let folder = await pinDownloadFolder();
+    pinnedDefault = !folderOverride && folder !== null;
+    if (!folder) {
+      folder = await chooseDownloadFolder();
       if (!folder) {
         update(b => ({ ...b, running: false, message: "Choose a folder to start the batch." }));
         return;
@@ -117,17 +125,20 @@ export async function runBatch(batch: Batch, settings: Settings, options: SaveOp
         if (next < work.length && settings.batchDelaySecs > 0) await pause(settings.batchDelaySecs);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(settings.concurrency, work.length) }, worker));
+    const workers = Math.max(1, Math.min(settings.concurrency, 5, work.length));
+    await Promise.all(Array.from({ length: workers }, worker));
     if (control.stop) {
       work.filter(i => i.status === "queued").forEach(i => { i.status = "canceled"; i.message = "Canceled"; });
     }
   } catch (cause) {
-    update(b => ({ ...b, message: errorMessage(cause) }));
+    failure = errorMessage(cause);
   }
+  if (pinnedDefault) await clearDownloadFolder().catch(() => {});
+  const stopped = control.stop || failure !== null;
   update(b => ({
     ...b, running: false, stopping: false,
-    items: b.items.map(i => i.status === "queued" && control.stop ? { ...i, status: "canceled", message: "Canceled" } : i),
-    message: summarize(items) || "Done.",
+    items: b.items.map(i => i.status === "queued" && stopped ? { ...i, status: "canceled", message: "Canceled" } : i),
+    message: failure ?? (summarize(items) || "Done."),
   }));
 }
 

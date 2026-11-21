@@ -11,6 +11,7 @@ let settings: Settings = {
 let override: string | null = null;
 const history = new Set<string>(["fedcba9876543210fedcba9876543210"]);
 const canceled = new Set<number>();
+const active = new Set<number>();
 const idOf = (url: string) => url.match(/[0-9a-f]{32}/i)?.[0].toLowerCase() ?? "";
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -44,8 +45,10 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
         "not a link",
       ];
       case "cancel_save":
-        if (args.job == null) canceled.add(-1); else canceled.add(Number(args.job));
+        // Cancel-all applies to the jobs running now, like the Rust side.
+        if (args.job == null) active.forEach(j => canceled.add(j)); else canceled.add(Number(args.job));
         return null;
+      case "pin_download_folder": return (override = override ?? settings.folder);
       case "set_retries": return (settings = { ...settings, retries: Number(args.retries) });
       case "choose_folder": return (settings = { ...settings, folder: "D:\\Archive\\Loom" });
       case "ask_each_time": return (settings = { ...settings, folder: null });
@@ -63,10 +66,12 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
 export async function mockSave(job: number, url: string, request: DownloadRequest,
   update: (p: TransferProgress) => void): Promise<SaveResult | null> {
   if (url.includes("2222")) { await wait(400); throw "Loom asked us to slow down. Try again later."; }
+  active.add(job);
   for (let bytes = 0; bytes <= 40e6; bytes += 8e6) {
-    if (canceled.has(job) || canceled.has(-1)) { canceled.delete(job); return null; }
+    if (canceled.has(job)) { canceled.delete(job); active.delete(job); return null; }
     update({ bytes, total: null, percent: bytes / 4e5, finalizing: false }); await wait(300);
   }
+  active.delete(job);
   history.add(idOf(url));
   void request;
   update({ bytes: 40e6, total: 40e6, percent: null, finalizing: true });
