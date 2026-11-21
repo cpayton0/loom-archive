@@ -446,22 +446,31 @@ async fn save_webvtt(url: Url, path: PathBuf) -> Result<(), SaveError> {
     write_new(path, body).await
 }
 
+fn is_jpeg(body: &[u8]) -> bool {
+    body.starts_with(&[0xFF, 0xD8, 0xFF])
+}
+
+fn is_gif(body: &[u8]) -> bool {
+    body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")
+}
+
+/// Upstream's `--gif` thumbnail path.
+fn gif_url(id: &str) -> Result<Url, SaveError> {
+    Url::parse(&format!("https://cdn.loom.com/sessions/thumbnails/{id}-00001.gif"))
+        .map_err(|_| AnalyzeError::InvalidMediaUrl.into())
+}
+
 async fn save_jpeg(url: Url, path: PathBuf) -> Result<(), SaveError> {
     let body = read_limited(fetch_asset(url).await?, 50 * 1024 * 1024).await?;
-    if !body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    if !is_jpeg(&body) {
         return Err(SaveError::InvalidMedia);
     }
     write_new(path, body).await
 }
 
-/// Upstream's `--gif` thumbnail path.
 async fn save_gif(id: String, path: PathBuf) -> Result<(), SaveError> {
-    let url = Url::parse(&format!(
-        "https://cdn.loom.com/sessions/thumbnails/{id}-00001.gif"
-    ))
-    .map_err(|_| AnalyzeError::InvalidMediaUrl)?;
-    let body = read_limited(fetch_asset(url).await?, 50 * 1024 * 1024).await?;
-    if !(body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")) {
+    let body = read_limited(fetch_asset(gif_url(&id)?).await?, 50 * 1024 * 1024).await?;
+    if !is_gif(&body) {
         return Err(SaveError::InvalidMedia);
     }
     write_new(path, body).await
@@ -473,9 +482,24 @@ async fn seek_preview_urls(
     id: &str,
     found: crate::page::SeekPreview,
 ) -> Result<(Option<Url>, Option<Url>), SaveError> {
-    let vtt = match found.vtt {
-        Some(vtt) => Some(vtt),
-        None => seek_preview_vtt(id).await?,
+    let fallback = match found.vtt {
+        Some(_) => Ok(None),
+        None => seek_preview_vtt(id).await.map_err(SaveError::from),
+    };
+    pick_seek_urls(found, fallback)
+}
+
+/// Combines page data with the GraphQL fallback result. A failed fallback
+/// only matters when the page provided nothing at all.
+fn pick_seek_urls(
+    found: crate::page::SeekPreview,
+    fallback: Result<Option<Url>, SaveError>,
+) -> Result<(Option<Url>, Option<Url>), SaveError> {
+    let vtt = match (found.vtt, fallback) {
+        (Some(vtt), _) => Some(vtt),
+        (None, Ok(vtt)) => vtt,
+        (None, Err(error)) if found.image.is_none() => return Err(error),
+        (None, Err(_)) => None,
     };
     let image = found.image.or_else(|| vtt.as_ref().and_then(sprite_beside));
     Ok((image, vtt))
@@ -700,16 +724,45 @@ mod tests {
 
     #[test]
     fn extras_join_the_collision_check() {
-        let dir = tempfile::tempdir().unwrap();
         let options = SaveOptions {
             gif: true,
             seek_preview: true,
             ..SaveOptions::default()
         };
-        std::fs::write(dir.path().join("rec-seek-preview.vtt"), b"x").unwrap();
+        for name in ["rec-thumbnail.gif", "rec-seek-preview.jpg", "rec-seek-preview.vtt"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+            assert_eq!(
+                Plan::new(dir.path(), "rec", &options).taken().unwrap().as_deref(),
+                Some(name)
+            );
+        }
+    }
+
+    #[test]
+    fn seek_urls_combine_page_data_and_the_fallback() {
+        use crate::page::SeekPreview;
+        let u = |s: &str| Url::parse(&format!("https://cdn.loom.com/mediametadata/seekpreview/a/{s}")).unwrap();
+        let both = SeekPreview { image: Some(u("s.jpg")), vtt: Some(u("i.vtt")) };
+        assert_eq!(pick_seek_urls(both, Err(SaveError::Interrupted)).unwrap(), (Some(u("s.jpg")), Some(u("i.vtt"))));
+        let vtt_only = SeekPreview { image: None, vtt: Some(u("i.vtt")) };
+        assert_eq!(pick_seek_urls(vtt_only, Ok(None)).unwrap(), (Some(u("i.jpg")), Some(u("i.vtt"))));
+        assert_eq!(pick_seek_urls(SeekPreview::default(), Ok(Some(u("g.vtt")))).unwrap(), (Some(u("g.jpg")), Some(u("g.vtt"))));
+        assert_eq!(pick_seek_urls(SeekPreview::default(), Ok(None)).unwrap(), (None, None));
+        // A failed fallback keeps a sprite the page already gave …
+        let image_only = SeekPreview { image: Some(u("s.jpg")), vtt: None };
+        assert_eq!(pick_seek_urls(image_only, Err(SaveError::Interrupted)).unwrap(), (Some(u("s.jpg")), None));
+        // … and is reported only when there is nothing else.
+        assert!(matches!(pick_seek_urls(SeekPreview::default(), Err(SaveError::Interrupted)), Err(SaveError::Interrupted)));
+    }
+
+    #[test]
+    fn image_checks_and_the_gif_path_match_upstream() {
+        assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xE0]) && !is_jpeg(b"<html>"));
+        assert!(is_gif(b"GIF89a....") && is_gif(b"GIF87a") && !is_gif(b"GIF90a") && !is_gif(b"<html>"));
         assert_eq!(
-            Plan::new(dir.path(), "rec", &options).taken().unwrap().as_deref(),
-            Some("rec-seek-preview.vtt")
+            gif_url("0123456789abcdef0123456789abcdef").unwrap().as_str(),
+            "https://cdn.loom.com/sessions/thumbnails/0123456789abcdef0123456789abcdef-00001.gif"
         );
     }
 

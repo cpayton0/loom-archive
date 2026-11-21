@@ -122,5 +122,8 @@ mod tests {
         assert_eq!(options.quality, Quality::P720);
         assert_eq!(options.content, Content::AudioOnly);
         assert_eq!(options.naming, FileNaming::Id);
+        let extras: SaveOptions =
+            serde_json::from_str(r#"{"gif":true,"seekPreview":true,"captions":true}"#).unwrap();
+        assert!(extras.gif && extras.seek_preview && extras.captions);
     }
 }

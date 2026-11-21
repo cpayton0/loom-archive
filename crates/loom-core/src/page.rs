@@ -93,9 +93,16 @@ pub(crate) struct SeekPreview {
 }
 
 impl SeekPreview {
-    fn add(&mut self, url: Url) {
+    /// Keeps the first sprite and index on Loom's media hosts. `scoped` URLs
+    /// came from the selected recording's own data; others (whole cache,
+    /// page markup) must also name the recording, or they are ignored and the
+    /// GraphQL fallback for this ID is used instead.
+    fn add(&mut self, url: Url, id: &str, scoped: bool) {
         let path = url.path().to_ascii_lowercase();
-        if !path.contains("seekpreview") {
+        if !path.contains("seekpreview")
+            || crate::transport::checked_media_host(&url).is_err()
+            || (!scoped && !names_recording(&url, id))
+        {
             return;
         }
         if path.ends_with(".jpg") {
@@ -110,20 +117,29 @@ impl SeekPreview {
     }
 }
 
-/// Every string reachable from `value`, following Apollo `__ref`s a few levels deep.
-fn strings<'a>(state: &'a Value, value: &'a Value, depth: u8, out: &mut Vec<&'a str>) {
+/// Every string reachable from `value`, following Apollo `__ref`s a few
+/// levels deep but never into another recording's record.
+fn strings<'a>(
+    state: &'a Value,
+    value: &'a Value,
+    id: &str,
+    depth: u8,
+    out: &mut Vec<&'a str>,
+) {
     match value {
         Value::String(s) => out.push(s),
         Value::Array(items) if depth > 0 => {
-            items.iter().for_each(|v| strings(state, v, depth - 1, out));
+            items.iter().for_each(|v| strings(state, v, id, depth - 1, out));
         }
         Value::Object(map) if depth > 0 => match map.get("__ref").and_then(Value::as_str) {
             Some(key) => {
-                if let Some(target) = state.get(key) {
-                    strings(state, target, depth - 1, out);
+                if let Some(target) = state.get(key)
+                    && !(video_record(target) && !matches_id(target, id))
+                {
+                    strings(state, target, id, depth - 1, out);
                 }
             }
-            None => map.values().for_each(|v| strings(state, v, depth - 1, out)),
+            None => map.values().for_each(|v| strings(state, v, id, depth - 1, out)),
         },
         _ => {}
     }
@@ -131,21 +147,27 @@ fn strings<'a>(state: &'a Value, value: &'a Value, depth: u8, out: &mut Vec<&'a 
 
 /// Upstream's seek-preview search: Apollo data first, then the page markup,
 /// where JSON escapes `&` as `\u0026`.
-fn seek_preview(state: &Value, video: &Value, html: &str, one_recording: bool) -> SeekPreview {
+fn seek_preview(
+    state: &Value,
+    video: &Value,
+    id: &str,
+    html: &str,
+    one_recording: bool,
+) -> SeekPreview {
     let mut found = SeekPreview::default();
-    let add_all = |values: Vec<&str>, found: &mut SeekPreview| {
+    let add_all = |values: Vec<&str>, found: &mut SeekPreview, scoped: bool| {
         values
             .into_iter()
             .filter_map(|s| https_url(&Value::from(s)))
-            .for_each(|u| found.add(u));
+            .for_each(|u| found.add(u, id, scoped));
     };
     let mut values = Vec::new();
-    strings(state, video, 4, &mut values);
-    add_all(values, &mut found);
+    strings(state, video, id, 4, &mut values);
+    add_all(values, &mut found, true);
     if one_recording && !found.complete() {
         let mut values = Vec::new();
-        strings(state, state, 4, &mut values);
-        add_all(values, &mut found);
+        strings(state, state, id, 4, &mut values);
+        add_all(values, &mut found, false);
     }
     if one_recording && !found.complete() {
         let unescaped = html.replace("\\u0026", "&");
@@ -153,7 +175,7 @@ fn seek_preview(state: &Value, video: &Value, html: &str, one_recording: bool) -
             .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '<' | '>'))
             .filter(|t| t.starts_with("https://") && t.contains("seekpreview"))
             .filter_map(|t| Url::parse(t).ok())
-            .for_each(|u| found.add(u));
+            .for_each(|u| found.add(u, id, false));
     }
     found
 }
@@ -327,7 +349,7 @@ pub(crate) fn inspect_page(share: &Url, html: &str) -> Result<PageInfo, AnalyzeE
         }
     }
 
-    let seek_preview = seek_preview(&state, video, html, one_recording);
+    let seek_preview = seek_preview(&state, video, id, html, one_recording);
 
     // Upstream order: the HLS stream the player uses, then a direct MP4 only
     // when the page reports no usable HLS URL.
@@ -384,24 +406,72 @@ mod tests {
         );
     }
 
+    const SEEK_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn seek(host: &str, id: &str, file: &str) -> String {
+        format!("https://{host}/mediametadata/seekpreview/{id}/{file}?Policy=p")
+    }
+
     #[test]
     fn seek_preview_comes_from_the_recording_then_the_page() {
         let state = serde_json::json!({
-            "RegularUserVideo:a": {"id":"a","__typename":"RegularUserVideo","media":{"__ref":"Media:1"}},
-            "Media:1": {"seek": "https://cdn.loom.com/mediametadata/seekpreview/a/sprite.jpg?Policy=x"}
+            "RegularUserVideo:a": {"id": SEEK_ID, "__typename":"RegularUserVideo","media":{"__ref":"Media:1"}},
+            "Media:1": {"seek": seek("cdn.loom.com", "anything", "sprite.jpg")}
         });
         let video = &state["RegularUserVideo:a"];
-        let html = r#"<script>x="https://cdn.loom.com/mediametadata/seekpreview/a/index.vtt?Policy=p\u0026Signature=s"</script>"#;
-        let found = seek_preview(&state, video, html, true);
-        assert_eq!(found.image.unwrap().path(), "/mediametadata/seekpreview/a/sprite.jpg");
-        let vtt = found.vtt.unwrap();
-        assert_eq!(vtt.query(), Some("Policy=p&Signature=s"));
+        let html = format!(r#"<script>x="{}\u0026Signature=s"</script>"#, seek("cdn.loom.com", SEEK_ID, "index.vtt"));
+        let found = seek_preview(&state, video, SEEK_ID, &html, true);
+        // The recording's own data needs no ID in the path.
+        assert_eq!(found.image.unwrap().path(), "/mediametadata/seekpreview/anything/sprite.jpg");
+        assert_eq!(found.vtt.unwrap().query(), Some("Policy=p&Signature=s"));
         // With several recordings on the page, only the selected record counts.
-        let scoped = seek_preview(&state, video, html, false);
+        let scoped = seek_preview(&state, video, SEEK_ID, &html, false);
         assert!(scoped.image.is_some() && scoped.vtt.is_none());
         // Plain http and unrelated files are ignored.
         let other = r#""http://cdn.loom.com/mediametadata/seekpreview/a/x.vtt" "https://cdn.loom.com/a.vtt""#;
-        assert_eq!(seek_preview(&Value::Null, &Value::Null, other, true), SeekPreview::default());
+        assert_eq!(seek_preview(&Value::Null, &Value::Null, SEEK_ID, other, true), SeekPreview::default());
+    }
+
+    #[test]
+    fn planted_or_foreign_seek_urls_never_win() {
+        let other = "fedcba9876543210fedcba9876543210";
+        // A foreign host in the recording's own data, then the real one.
+        let state = serde_json::json!({
+            "RegularUserVideo:a": {"id": SEEK_ID, "__typename":"RegularUserVideo",
+                "description": seek("evil.example", SEEK_ID, "index.vtt"),
+                "seekPreviewCdnUrl": seek("cdn.loom.com", SEEK_ID, "index.vtt")}
+        });
+        let found = seek_preview(&state, &state["RegularUserVideo:a"], SEEK_ID, "", true);
+        assert_eq!(found.vtt.unwrap().host_str(), Some("cdn.loom.com"));
+        // Page markup must name this recording.
+        let html = format!("{} {}", seek("cdn.loom.com", other, "x.vtt"), seek("cdn.loom.com", SEEK_ID, "y.vtt"));
+        let found = seek_preview(&Value::Null, &Value::Null, SEEK_ID, &html, true);
+        assert!(found.vtt.unwrap().path().ends_with("/y.vtt"));
+        // A reference from the selected record into another recording is not followed.
+        let state = serde_json::json!({
+            "RegularUserVideo:a": {"id": SEEK_ID, "__typename":"RegularUserVideo",
+                "aNext": {"__ref": "RegularUserVideo:b"}},
+            "RegularUserVideo:b": {"id": other, "__typename":"RegularUserVideo",
+                "seek": seek("cdn.loom.com", "shared", "index.vtt")}
+        });
+        let found = seek_preview(&state, &state["RegularUserVideo:a"], SEEK_ID, "", false);
+        assert_eq!(found, SeekPreview::default());
+    }
+
+    #[test]
+    fn inspect_page_reports_the_seek_preview() {
+        let share = Url::parse(&format!("https://www.loom.com/share/{SEEK_ID}")).unwrap();
+        let state = serde_json::json!({
+            format!("RegularUserVideo:{SEEK_ID}"): {
+                "__typename": "RegularUserVideo", "id": SEEK_ID, "name": "Demo",
+                "nullableRawCdnUrl({\"acceptableMimes\":[\"M3U8\"]})": {"url": "https://cdn.loom.com/s/playlist.m3u8"}
+            },
+            "Seek:1": {"vtt": seek("cdn.loom.com", SEEK_ID, "index.vtt")}
+        });
+        let html = format!("<script>window.__APOLLO_STATE__ = {state};</script>");
+        let info = inspect_page(&share, &html).unwrap();
+        // Found by the whole-cache pass on a single-recording page.
+        assert!(info.seek_preview.vtt.is_some() && info.seek_preview.image.is_none());
     }
 
     #[test]
