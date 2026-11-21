@@ -68,6 +68,8 @@ pub struct SaveOptions {
     pub transcript: bool,
     /// Also save `<name>-thumbnail.jpg` (upstream `--image`).
     pub thumbnail: bool,
+    /// Also save `<name>.captions.vtt`. Upstream lists captions but never saves them.
+    pub captions: bool,
     pub collision: Collision,
 }
 

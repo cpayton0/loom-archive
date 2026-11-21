@@ -22,12 +22,16 @@ function size(n: number) { return (n / 1048576).toLocaleString(undefined, { maxi
 
 export function DownloadProgress({ job }: { job: Job }) {
   const p = job.progress;
+  // FFmpeg jobs report progress against the recording length; direct files against their size.
+  const percent = p?.percent ?? (p?.total ? (p.bytes / p.total) * 100 : null);
   return <div className="grid gap-1.5">
     {p && !p.finalizing && <>
-      {p.total ? <Progress value={(p.bytes / p.total) * 100} aria-label="Download progress" />
+      {percent !== null ? <Progress value={percent} aria-label="Download progress" aria-valuetext={`${Math.floor(percent)}%`} />
         : <div className="h-2 overflow-hidden rounded-full bg-primary/20" role="progressbar" aria-label="Download progress">
             <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" /></div>}
-      <p className="text-xs text-muted-foreground">{size(p.bytes)}{p.total ? ` of ${size(p.total)}` : " received"}</p>
+      <p className="text-xs text-muted-foreground">
+        {percent !== null && `${Math.floor(percent)}% · `}
+        {size(p.bytes)}{p.total ? ` of ${size(p.total)}` : " received"}</p>
     </>}
   </div>;
 }

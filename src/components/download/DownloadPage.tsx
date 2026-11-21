@@ -77,7 +77,9 @@ export function DownloadPage({ settings, session, update }: { settings: Settings
     update(s => ({ ...s, job: { ...idleJob, saving: true, message: askFolder ? "Choose a folder…" : "Starting…" } }));
     try {
       const result = await saveRecording(video.sourceUrl,
-        { options, fileName: session.fileName.trim() || null },
+        // Captions shown as unavailable are not requested.
+        { options: { ...options, captions: options.captions && video.assets.captions },
+          fileName: session.fileName.trim() || null },
         progress => setJob({ progress, message: progress.finalizing ? "Finishing…" : "Downloading…" }));
       update(s => ({ ...s, job: { ...idleJob, result,
         message: result ? `Saved ${result.files.length} file${result.files.length === 1 ? "" : "s"}.` : "Download canceled." } }));
@@ -114,7 +116,8 @@ export function DownloadPage({ settings, session, update }: { settings: Settings
       <DestinationPicker defaultFolder={settings.folder} override={session.folderOverride} disabled={busy}
         onBrowse={browse} onUseDefault={useDefault} />
 
-      <DownloadOptions options={options} transcriptListed={video ? video.assets.transcript : null} disabled={busy}
+      <DownloadOptions options={options} transcriptListed={video ? video.assets.transcript : null}
+        captionsListed={video ? video.assets.captions : null} disabled={busy}
         onChange={change => update(s => ({ ...s, overrides: { ...s.overrides, ...change } }))} />
 
       {changed && !busy && <div>

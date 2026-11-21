@@ -11,10 +11,34 @@ const HOST: &str = "www.loom.com";
 const MAX_PAGE: usize = 4 * 1024 * 1024;
 pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+/// The recording ID in a `share/` or `embed/` path segment: the whole segment,
+/// or the end of a title slug such as `Weekly-sync-<id>`.
+fn recording_id(segment: &str) -> Option<&str> {
+    // The raw path can hold any text; byte slicing below needs ASCII.
+    if !segment.is_ascii() {
+        return None;
+    }
+    let hex = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if hex(segment) {
+        return Some(segment);
+    }
+    let (slug, id) = segment.split_at(segment.len().checked_sub(32)?);
+    let slug = slug.strip_suffix('-')?;
+    (hex(id)
+        && !slug.is_empty()
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'%')))
+    .then_some(id)
+}
+
 pub fn normalize_share_url(input: &str) -> Result<Url, AnalyzeError> {
     let invalid = AnalyzeError::InvalidUrl;
-    let input = input.trim();
-    if input.len() > 8192 || input.contains('\\') || input.chars().any(char::is_control) {
+    // Shells escape `?` and `=` in pasted links (`\?sid\=…`); upstream strips
+    // backslashes before reading the link, and so does this port.
+    let cleaned: String = input.trim().chars().filter(|c| *c != '\\').collect();
+    let input = cleaned.as_str();
+    if input.len() > 8192 || input.chars().any(char::is_control) {
         return Err(invalid);
     }
     let url = Url::parse(input).map_err(|_| invalid)?;
@@ -28,11 +52,12 @@ pub fn normalize_share_url(input: &str) -> Result<Url, AnalyzeError> {
     {
         return Err(invalid);
     }
-    let id = path.strip_prefix("share/").ok_or(invalid)?;
-    let id = id.strip_suffix('/').unwrap_or(id);
-    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid);
-    }
+    let segment = path
+        .strip_prefix("share/")
+        .or_else(|| path.strip_prefix("embed/"))
+        .ok_or(invalid)?;
+    let segment = segment.strip_suffix('/').unwrap_or(segment);
+    let id = recording_id(segment).ok_or(invalid)?;
     Url::parse(&format!("https://{HOST}/share/{}", id.to_ascii_lowercase())).map_err(|_| invalid)
 }
 
@@ -261,14 +286,40 @@ mod tests {
             format!("https://127.0.0.1/share/{ID}"),
             format!("https://user@loom.com/share/{ID}"),
             format!("https://loom.com:8080/share/{ID}"),
-            format!("https://loom.com/embed/{ID}"),
             format!("https://loom.com/else/../share/{ID}"),
             "https://loom.com/share/xyz".into(),
             format!("https://loom.com/share/{ID}/extra"),
+            format!("https://loom.com/embed/{ID}/extra"),
+            format!("https://loom.com/share/-{ID}"),
+            format!("https://loom.com/share/bad slug-{ID}"),
+            format!("https://loom.com/share/a/b-{ID}"),
+            format!("https://loom.com/share/{ID}0"),
+            format!("https://loom.com/v/{ID}"),
+            "https://loom.com/share/€€€€€€€€€€€".into(),
+            format!("https://loom.com/share/é-{ID}"),
+            format!("https:\\\\evil.invalid\\share\\{ID}"),
         ] {
             let result =
                 analyze_with(&link, |_| async { panic!("invalid URL reached transport") }).await;
             assert_eq!(result.err(), Some(AnalyzeError::InvalidUrl), "{link}");
+        }
+    }
+
+    #[test]
+    fn embed_slug_and_shell_escaped_links_resolve_to_the_share_page() {
+        let canonical = format!("https://www.loom.com/share/{ID}");
+        for link in [
+            format!("https://www.loom.com/embed/{ID}"),
+            format!("https://loom.com/embed/{ID}?hide_owner=true"),
+            format!("https://www.loom.com/share/Weekly-sync_v2.1-{ID}"),
+            format!("https://www.loom.com/share/Caf%C3%A9-notes-{ID}/"),
+            format!("https://www.loom.com/share/{ID}\\?sid\\=abc"),
+        ] {
+            assert_eq!(
+                normalize_share_url(&link).map(|u| u.to_string()),
+                Ok(canonical.clone()),
+                "{link}"
+            );
         }
     }
 

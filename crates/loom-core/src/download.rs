@@ -23,6 +23,8 @@ use url::Url;
 pub struct TransferProgress {
     pub bytes: u64,
     pub total: Option<u64>,
+    /// 0–100 when the length is known in time rather than bytes (FFmpeg jobs).
+    pub percent: Option<f64>,
     pub finalizing: bool,
 }
 
@@ -34,6 +36,8 @@ pub enum SaveError {
     Exists(String),
     #[error("Loom did not list a transcript for this recording.")]
     NoTranscript,
+    #[error("Loom did not list captions for this recording.")]
+    NoCaptions,
     #[error("Enter a file name that contains letters or numbers and is allowed on Windows.")]
     InvalidFileName,
     #[error("The transfer was interrupted. Check your connection and try again.")]
@@ -80,6 +84,62 @@ async fn cancelable<T>(
     }
 }
 
+/// Delay before retry `attempt + 1`: 1 s doubling to a 32 s cap, as upstream.
+fn retry_delay(attempt: u8) -> Duration {
+    Duration::from_secs(1 << attempt.min(5))
+}
+
+/// Runs `attempt` until it succeeds, fails for a reason other than a dropped
+/// connection, or `retries` extra attempts are used. Waits per
+/// [`retry_delay`] in between and stops at once when canceled. Returns the
+/// result and the number of retries made.
+async fn with_retries<T, F, Fut>(
+    retries: u8,
+    cancel: &CancellationToken,
+    mut attempt: F,
+) -> (Result<T, SaveError>, u8)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, SaveError>>,
+{
+    let mut made = 0;
+    loop {
+        match attempt().await {
+            Err(SaveError::Interrupted | SaveError::Page(AnalyzeError::Network))
+                if made < retries =>
+            {
+                let wait = retry_delay(made);
+                made += 1;
+                let slept = cancelable(cancel, async {
+                    tokio::time::sleep(wait).await;
+                    Ok(())
+                })
+                .await;
+                if let Err(error) = slept {
+                    return (Err(error), made);
+                }
+            }
+            result => return (result, made),
+        }
+    }
+}
+
+/// What happens when an extra file (transcript, captions, thumbnail…) fails:
+/// `None` means it was saved, `Some(note)` explains a skip. Only a transcript
+/// failure in transcript-only mode fails the whole download.
+fn extra_outcome(
+    label: &str,
+    transcript_only: bool,
+    result: Result<(), SaveError>,
+) -> Result<Option<String>, SaveError> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(error) if transcript_only && label == "transcript" => Err(error),
+        Err(SaveError::Canceled) => Ok(Some(format!("Canceled before the {label} was saved."))),
+        Err(error) => Ok(Some(format!("The {label} was not saved: {error}"))),
+    }
+}
+
 /// One download: the effective options plus per-download and app overrides.
 #[derive(Clone, Debug, Default)]
 pub struct SaveRequest {
@@ -106,6 +166,7 @@ struct Plan {
     media: Option<PathBuf>,
     transcript: Option<PathBuf>,
     thumbnail: Option<PathBuf>,
+    captions: Option<PathBuf>,
 }
 
 impl Plan {
@@ -122,11 +183,14 @@ impl Plan {
             thumbnail: options
                 .thumbnail
                 .then(|| folder.join(format!("{base}-thumbnail.jpg"))),
+            captions: options
+                .captions
+                .then(|| folder.join(format!("{base}.captions.vtt"))),
         }
     }
 
     fn taken(&self) -> Result<Option<String>, SaveError> {
-        for path in [&self.media, &self.transcript, &self.thumbnail]
+        for path in [&self.media, &self.transcript, &self.thumbnail, &self.captions]
             .into_iter()
             .flatten()
         {
@@ -140,6 +204,7 @@ impl Plan {
 
 async fn save_media(
     request: &SaveRequest,
+    duration: Option<f64>,
     media: &MediaSource,
     path: &Path,
     cancel: &CancellationToken,
@@ -150,12 +215,22 @@ async fn save_media(
     let exe = || find_ffmpeg(request.ffmpeg.as_deref()).ok_or(SaveError::MissingFfmpeg);
     match media {
         MediaSource::Hls(stream) => {
-            crate::hls::save(&exe()?, stream, options.quality, audio_only, path, cancel, progress)
-                .await?;
+            crate::hls::save(
+                &exe()?,
+                stream,
+                options.quality,
+                audio_only,
+                duration,
+                path,
+                cancel,
+                progress,
+            )
+            .await?;
         }
         MediaSource::Mp4(url) if audio_only => {
             let job = crate::hls::Job::single(crate::hls::stream_options(None), url.as_str())
-                .maps(&["-map", "0:a:0", "-vn"]);
+                .maps(&["-map", "0:a:0", "-vn"])
+                .duration(duration);
             crate::hls::save_with(&exe()?, &job, Expect::Audio, path, cancel, progress).await?;
         }
         MediaSource::Mp4(url) => {
@@ -201,6 +276,18 @@ pub async fn save_recording(
             .unwrap_or_else(|| page.video.id.clone()),
         FileNaming::Id => page.video.id.clone(),
     });
+    // Captions the page does not list are dropped up front, so a leftover
+    // `.captions.vtt` cannot cause a collision for a file that won't be written.
+    let mut early_notes = Vec::new();
+    let mut adjusted;
+    let options = if options.captions && page.captions.is_none() {
+        early_notes.push("Loom did not list captions for this recording.".to_string());
+        adjusted = options.clone();
+        adjusted.captions = false;
+        &adjusted
+    } else {
+        options
+    };
     let mut plan = Plan::new(folder, &base, options);
     if let Some(name) = plan.taken()? {
         if options.collision == Collision::Stop {
@@ -216,20 +303,18 @@ pub async fn save_recording(
         return Err(SaveError::NoTranscript);
     }
 
-    let mut saved = SavedFiles::default();
+    let mut saved = SavedFiles {
+        notes: early_notes,
+        ..SavedFiles::default()
+    };
     if let Some(path) = plan.media {
         let media = page.media?;
-        let mut attempt = 0;
-        let note = loop {
-            match save_media(request, &media, &path, cancel, &progress).await {
-                Err(SaveError::Interrupted | SaveError::Page(AnalyzeError::Network))
-                    if attempt < request.retries =>
-                {
-                    attempt += 1;
-                }
-                result => break result?,
-            }
-        };
+        let duration = page.video.duration_seconds;
+        let (result, attempt) = with_retries(request.retries, cancel, || {
+            save_media(request, duration, &media, &path, cancel, &progress)
+        })
+        .await;
+        let note = result?;
         if attempt > 0 {
             saved.notes.push(format!(
                 "The transfer was interrupted and retried {attempt} time{}.",
@@ -241,17 +326,12 @@ pub async fn save_recording(
     }
     let transcript_path = plan.transcript;
     let thumbnail_path = plan.thumbnail;
+    let captions_path = plan.captions;
 
-    let mut record = |label: &str, path: PathBuf, result: Result<(), SaveError>| {
-        match result {
-            Ok(()) => saved.files.push(path),
-            Err(error) if transcript_only => return Err(error),
-            Err(SaveError::Canceled) => saved
-                .notes
-                .push(format!("Canceled before the {label} was saved.")),
-            Err(error) => saved
-                .notes
-                .push(format!("The {label} was not saved: {error}")),
+    let mut record = |label: &str, path: PathBuf, result: Result<(), SaveError>| -> Result<(), SaveError> {
+        match extra_outcome(label, transcript_only, result)? {
+            None => saved.files.push(path),
+            Some(note) => saved.notes.push(note),
         }
         Ok(())
     };
@@ -262,6 +342,15 @@ pub async fn save_recording(
                 record("transcript", path, result)?;
             }
             None => record("transcript", path, Err(SaveError::NoTranscript))?,
+        }
+    }
+    if let Some(path) = captions_path {
+        match page.captions {
+            Some(url) => {
+                let result = cancelable(cancel, save_captions(url, path.clone())).await;
+                record("captions file", path, result)?;
+            }
+            None => record("captions file", path, Err(SaveError::NoCaptions))?,
         }
     }
     if let Some(path) = thumbnail_path {
@@ -295,6 +384,23 @@ async fn save_transcript(url: Url, path: PathBuf) -> Result<(), SaveError> {
     let data: Value = serde_json::from_slice(&body).map_err(|_| AnalyzeError::PageFormat)?;
     let text = serde_json::to_vec_pretty(&format_transcript(data)).map_err(|_| SaveError::Storage)?;
     write_new(path, text).await
+}
+
+/// WebVTT captions from the page's `captions_source_url`.
+async fn save_captions(url: Url, path: PathBuf) -> Result<(), SaveError> {
+    let body = read_limited(fetch_asset(url).await?, 8 * 1024 * 1024).await?;
+    if !is_webvtt(&body) {
+        return Err(SaveError::InvalidMedia);
+    }
+    write_new(path, body).await
+}
+
+fn is_webvtt(body: &[u8]) -> bool {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    body.starts_with(b"WEBVTT")
+        && body
+            .get(6)
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
 }
 
 /// Upstream's thumbnail path for `--image`.
@@ -354,6 +460,7 @@ async fn save_response(
     progress(TransferProgress {
         bytes,
         total,
+        percent: None,
         finalizing: false,
     });
     loop {
@@ -371,6 +478,7 @@ async fn save_response(
             progress(TransferProgress {
                 bytes,
                 total,
+                percent: None,
                 finalizing: false,
             });
             last = Instant::now();
@@ -385,6 +493,7 @@ async fn save_response(
     progress(TransferProgress {
         bytes,
         total,
+        percent: None,
         finalizing: true,
     });
     finish(temp_path, dest, bytes, cancel, Expect::Video).await
@@ -468,6 +577,15 @@ mod tests {
         };
         std::fs::write(dir.path().join("rec.mp4"), b"x").unwrap();
         std::fs::write(dir.path().join("rec (2).transcript.json"), b"x").unwrap();
+        let with_captions = SaveOptions {
+            captions: true,
+            ..SaveOptions::default()
+        };
+        std::fs::write(dir.path().join("clip.captions.vtt"), b"x").unwrap();
+        assert_eq!(
+            Plan::new(dir.path(), "clip", &with_captions).taken().unwrap().as_deref(),
+            Some("clip.captions.vtt")
+        );
         assert_eq!(
             Plan::new(dir.path(), "rec", &options).taken().unwrap().as_deref(),
             Some("rec.mp4")
@@ -477,6 +595,72 @@ mod tests {
             .find(|p| matches!(p.taken(), Ok(None)))
             .unwrap();
         assert_eq!(free.media.unwrap(), dir.path().join("rec (3).mp4"));
+    }
+
+    #[test]
+    fn captions_must_be_webvtt() {
+        assert!(is_webvtt(b"WEBVTT\n\n00:00.000 --> 00:01.000\nHi"));
+        assert!(is_webvtt(b"\xEF\xBB\xBFWEBVTT - Loom\r\n"));
+        assert!(is_webvtt(b"WEBVTT"));
+        assert!(!is_webvtt(b"WEBVTTX"));
+        assert!(!is_webvtt(b"<Error><Code>AccessDenied</Code></Error>"));
+    }
+
+    #[test]
+    fn only_a_transcript_failure_fails_a_transcript_only_download() {
+        let fail = || Err(SaveError::InvalidMedia);
+        assert!(matches!(extra_outcome("transcript", true, fail()), Err(SaveError::InvalidMedia)));
+        for label in ["thumbnail", "captions file"] {
+            let note = extra_outcome(label, true, fail()).unwrap().unwrap();
+            assert!(note.starts_with(&format!("The {label} was not saved")), "{note}");
+        }
+        assert!(extra_outcome("transcript", false, fail()).unwrap().is_some());
+        assert_eq!(extra_outcome("thumbnail", true, Ok(())).unwrap(), None);
+        assert!(extra_outcome("thumbnail", false, Err(SaveError::Canceled))
+            .unwrap()
+            .unwrap()
+            .starts_with("Canceled before"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_wait_between_attempts_and_stop_when_canceled() {
+        let cancel = CancellationToken::new();
+        let calls = std::cell::Cell::new(0);
+        let start = tokio::time::Instant::now();
+        let (result, made) = with_retries(3, &cancel, || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move { if n < 3 { Err(SaveError::Interrupted) } else { Ok(n) } }
+        })
+        .await;
+        assert_eq!((result.unwrap(), made, calls.get()), (3, 2, 3));
+        assert_eq!(start.elapsed(), Duration::from_secs(1 + 2));
+
+        // Other failures are not retried.
+        let (result, made) =
+            with_retries(3, &cancel, || async { Err::<(), _>(SaveError::InvalidMedia) }).await;
+        assert!(matches!(result, Err(SaveError::InvalidMedia)) && made == 0);
+
+        // Canceling during the wait stops without another attempt.
+        let calls = std::cell::Cell::new(0);
+        let canceler = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            canceler.cancel();
+        });
+        let (result, _) = with_retries(3, &cancel, || {
+            calls.set(calls.get() + 1);
+            async { Err::<(), _>(SaveError::Interrupted) }
+        })
+        .await;
+        assert!(matches!(result, Err(SaveError::Canceled)));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn retries_back_off_exponentially_with_a_cap() {
+        let waits: Vec<_> = (0..8).map(|a| retry_delay(a).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 32, 32]);
     }
 
     #[test]

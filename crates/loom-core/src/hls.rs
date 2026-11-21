@@ -97,6 +97,8 @@ fn classify_failure(stderr: &str) -> SaveError {
 pub(crate) struct Job {
     pub inputs: Vec<(Vec<String>, String)>,
     pub maps: Vec<String>,
+    /// Recording length from the share page, used to report a percentage.
+    pub duration: Option<f64>,
 }
 
 impl Job {
@@ -104,12 +106,49 @@ impl Job {
         Self {
             inputs: vec![(options, input.into())],
             maps: Vec::new(),
+            duration: None,
         }
     }
 
     pub(crate) fn maps(mut self, maps: &[&str]) -> Self {
         self.maps = maps.iter().map(|m| m.to_string()).collect();
         self
+    }
+
+    pub(crate) fn duration(mut self, seconds: Option<f64>) -> Self {
+        self.duration = seconds.filter(|d| d.is_finite() && *d > 0.0);
+        self
+    }
+}
+
+/// Accumulates one `-progress` block (key=value lines ending in `progress=`).
+#[derive(Default)]
+struct ProgressBlock {
+    bytes: u64,
+    out_us: Option<f64>,
+}
+
+impl ProgressBlock {
+    fn line(&mut self, line: &str, duration: Option<f64>) -> Option<TransferProgress> {
+        let (key, value) = line.split_once('=')?;
+        match key {
+            "total_size" => self.bytes = value.parse().unwrap_or(self.bytes),
+            // FFmpeg's `out_time_ms` is also microseconds; prefer the explicit key.
+            "out_time_us" => self.out_us = value.parse().ok().or(self.out_us),
+            "progress" => {
+                let percent = duration.zip(self.out_us).map(|(total, us)| {
+                    (us / 1_000_000.0 / total * 100.0).clamp(0.0, 100.0)
+                });
+                return Some(TransferProgress {
+                    bytes: self.bytes,
+                    total: None,
+                    percent,
+                    finalizing: false,
+                });
+            }
+            _ => {}
+        }
+        None
     }
 }
 
@@ -144,13 +183,10 @@ async fn run_ffmpeg(
     let outcome = {
         let report = async {
             let mut lines = BufReader::new(stdout).lines();
+            let mut state = ProgressBlock::default();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(Ok(bytes)) = line.strip_prefix("total_size=").map(str::parse) {
-                    progress(TransferProgress {
-                        bytes,
-                        total: None,
-                        finalizing: false,
-                    });
+                if let Some(update) = state.line(&line, job.duration) {
+                    progress(update);
                 }
             }
         };
@@ -199,6 +235,7 @@ pub(crate) async fn save_with(
     progress(TransferProgress {
         bytes: 0,
         total: None,
+        percent: None,
         finalizing: false,
     });
     run_ffmpeg(exe, job, &output, cancel, &progress).await?;
@@ -206,6 +243,7 @@ pub(crate) async fn save_with(
     progress(TransferProgress {
         bytes: size,
         total: Some(size),
+        percent: None,
         finalizing: true,
     });
     finish(output, dest, size, cancel, expect).await
@@ -284,6 +322,7 @@ pub(crate) async fn save(
     source: &HlsSource,
     quality: Quality,
     audio_only: bool,
+    duration: Option<f64>,
     dest: &Path,
     cancel: &CancellationToken,
     progress: impl Fn(TransferProgress),
@@ -308,7 +347,7 @@ pub(crate) async fn save(
         };
         (job.unwrap_or_else(upstream), Expect::Video)
     };
-    save_with(exe, &job, expect, dest, cancel, progress).await
+    save_with(exe, &job.duration(duration), expect, dest, cancel, progress).await
 }
 
 #[cfg(test)]
@@ -334,6 +373,23 @@ mod tests {
         assert_eq!(value("-protocol_whitelist"), "https,tls,tcp,crypto");
         let options = stream_options(None);
         assert!(options.contains(&"Referer: https://www.loom.com/\r\n".to_string()));
+    }
+
+    #[test]
+    fn progress_blocks_report_bytes_and_a_clamped_percentage() {
+        let mut block = ProgressBlock::default();
+        let feed = |block: &mut ProgressBlock, lines: &[&str], duration| {
+            lines.iter().filter_map(|l| block.line(l, duration)).last()
+        };
+        let early = feed(&mut block, &["out_time_us=N/A", "total_size=48", "progress=continue"], Some(10.0)).unwrap();
+        assert_eq!((early.bytes, early.percent), (48, None));
+        let half = feed(&mut block, &["out_time_us=5000000", "total_size=900", "progress=continue"], Some(10.0)).unwrap();
+        assert_eq!((half.bytes, half.percent), (900, Some(50.0)));
+        let over = feed(&mut block, &["out_time_us=12000000", "progress=end"], Some(10.0)).unwrap();
+        assert_eq!(over.percent, Some(100.0));
+        let unknown = feed(&mut block, &["out_time_us=1000000", "progress=continue"], None).unwrap();
+        assert_eq!(unknown.percent, None);
+        assert!(Job::single(Vec::new(), "x").duration(Some(f64::NAN)).duration.is_none());
     }
 
     #[test]
@@ -398,7 +454,7 @@ mod tests {
             .map(String::from)
             .to_vec();
         let playlist = hls.join("master.m3u8").display().to_string();
-        let job = Job::single(local.clone(), &playlist);
+        let job = Job::single(local.clone(), &playlist).duration(Some(3.0));
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let dest = out.join("rec.mp4");
@@ -409,12 +465,15 @@ mod tests {
         assert_eq!(out.read_dir().unwrap().count(), 0);
 
         let last = std::cell::Cell::new(None);
+        let peak = std::cell::Cell::new(0.0_f64);
         save_with(&exe, &job, Expect::Video, &dest, &CancellationToken::new(), |p| {
+            peak.set(peak.get().max(p.percent.unwrap_or(0.0)));
             last.set(Some(p))
         })
         .await
         .unwrap();
         assert!(last.get().is_some_and(|p| p.finalizing));
+        assert!(peak.get() > 50.0 && peak.get() <= 100.0, "peak {}", peak.get());
         assert_eq!(out.read_dir().unwrap().count(), 1);
         let probe = std::process::Command::new(&exe)
             .args(["-v", "error", "-xerror", "-i"])

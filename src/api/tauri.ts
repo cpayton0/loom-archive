@@ -22,6 +22,7 @@ export interface SaveOptions {
   quality: Quality;
   transcript: boolean;
   thumbnail: boolean;
+  captions: boolean;
   collision: Collision;
 }
 
@@ -34,7 +35,7 @@ export interface Settings extends SaveOptions {
 }
 
 export interface AppInfo { version: string; ffmpeg: string | null; }
-export interface TransferProgress { bytes: number; total: number | null; finalizing: boolean; }
+export interface TransferProgress { bytes: number; total: number | null; percent: number | null; finalizing: boolean; }
 export interface SaveResult { files: string[]; notes: string[]; }
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -48,8 +49,8 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 }
 
 export function saveOptions(settings: Settings): SaveOptions {
-  const { naming, content, quality, transcript, thumbnail, collision } = settings;
-  return { naming, content, quality, transcript, thumbnail, collision };
+  const { naming, content, quality, transcript, thumbnail, captions, collision } = settings;
+  return { naming, content, quality, transcript, thumbnail, captions, collision };
 }
 
 export const analyzeUrl = (url: string) => call<VideoDescriptor>("analyze_url", { url });
