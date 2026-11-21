@@ -34,6 +34,9 @@ export interface Settings extends SaveOptions {
   folder: string | null;
   ffmpeg: string | null;
   retries: number;
+  concurrency: number;
+  batchDelaySecs: number;
+  skipDownloaded: boolean;
 }
 
 export interface AppInfo { version: string; ffmpeg: string | null; }
@@ -59,6 +62,12 @@ export const analyzeUrl = (url: string) => call<VideoDescriptor>("analyze_url", 
 export const getSettings = () => call<Settings>("get_settings");
 export const setOptions = (options: SaveOptions) => call<Settings>("set_options", { options });
 export const setTheme = (theme: Theme) => call<Settings>("set_theme", { theme });
+export const setBatch = (concurrency: number, delaySecs: number, skipDownloaded: boolean) =>
+  call<Settings>("set_batch", { concurrency, delaySecs, skipDownloaded });
+/** For each link, whether the recording is already in the download history. */
+export const downloaded = (urls: string[]) => call<boolean[]>("downloaded", { urls });
+/** Opens a .txt list in a native dialog; Rust reads it and returns its non-empty lines. */
+export const openLinkList = () => call<string[] | null>("open_link_list");
 export const setRetries = (retries: number) => call<Settings>("set_retries", { retries });
 export const chooseFolder = () => call<Settings>("choose_folder");
 export const askEachTime = () => call<Settings>("ask_each_time");
@@ -68,18 +77,34 @@ export const appInfo = () => call<AppInfo>("app_info");
 /** Picks a folder for the current download only; returns the active override. */
 export const chooseDownloadFolder = () => call<string | null>("choose_download_folder");
 export const clearDownloadFolder = () => call<void>("clear_download_folder");
-export const cancelSave = () => call<void>("cancel_save");
+/** Cancels one job, or every running download when no job is given. */
+export const cancelSave = (job?: number) => call<void>("cancel_save", { job: job ?? null });
+
+let lastJob = 0;
+/** A process-unique job number for save_recording and cancel_save. */
+export const nextJob = () => ++lastJob;
+
+export interface DownloadRequest {
+  options: SaveOptions;
+  fileName: string | null;
+  /** Batch numbering: files become `<prefix>-<index>-<name>`. */
+  prefix?: string | null;
+  index?: number | null;
+}
 export const openInLoom = (url: string) => call<void>("open_in_loom", { url });
 
 export function saveRecording(
+  job: number,
   url: string,
-  request: { options: SaveOptions; fileName: string | null },
+  request: DownloadRequest,
   update: (value: TransferProgress) => void,
 ) {
-  if (mock) return mock.then(m => m.mockSave(update));
+  if (mock) return mock.then(m => m.mockSave(job, url, request, update));
   const progress = new Channel<TransferProgress>();
   progress.onmessage = update;
-  return invoke<SaveResult | null>("save_recording", { url, request, progress });
+  return invoke<SaveResult | null>("save_recording", {
+    job, url, request: { prefix: null, index: null, ...request }, progress,
+  });
 }
 
 export function errorMessage(error: unknown): string {

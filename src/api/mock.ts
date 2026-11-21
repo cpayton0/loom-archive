@@ -1,14 +1,17 @@
 // Development-only stand-in for the Tauri backend, used when the UI is opened
 // in a regular browser to check layout. Never imported by production builds.
-import type { AppInfo, SaveResult, Settings, TransferProgress, VideoDescriptor } from "./tauri";
+import type { AppInfo, DownloadRequest, SaveResult, Settings, TransferProgress, VideoDescriptor } from "./tauri";
 
 let settings: Settings = {
   theme: "dark",
   folder: "C:\\Users\\you\\Videos\\Loom Archive\\Customer calls\\2026",
-  ffmpeg: null, retries: 1,
+  ffmpeg: null, retries: 1, concurrency: 2, batchDelaySecs: 1, skipDownloaded: true,
   naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, captions: false, gif: false, seekPreview: false, collision: "stop",
 };
 let override: string | null = null;
+const history = new Set<string>(["fedcba9876543210fedcba9876543210"]);
+const canceled = new Set<number>();
+const idOf = (url: string) => url.match(/[0-9a-f]{32}/i)?.[0].toLowerCase() ?? "";
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 const video: VideoDescriptor = {
@@ -31,6 +34,18 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
       case "get_settings": return settings;
       case "set_options": return (settings = { ...settings, ...(args.options as object) });
       case "set_theme": return (settings = { ...settings, theme: args.theme as Settings["theme"] });
+      case "set_batch": return (settings = { ...settings, concurrency: Number(args.concurrency),
+        batchDelaySecs: Number(args.delaySecs), skipDownloaded: Boolean(args.skipDownloaded) });
+      case "downloaded": return (args.urls as string[]).map(u => history.has(idOf(u)));
+      case "open_link_list": return [
+        "https://www.loom.com/share/11111111111111111111111111111111",
+        "https://www.loom.com/share/22222222222222222222222222222222",
+        "https://www.loom.com/share/fedcba9876543210fedcba9876543210",
+        "not a link",
+      ];
+      case "cancel_save":
+        if (args.job == null) canceled.add(-1); else canceled.add(Number(args.job));
+        return null;
       case "set_retries": return (settings = { ...settings, retries: Number(args.retries) });
       case "choose_folder": return (settings = { ...settings, folder: "D:\\Archive\\Loom" });
       case "ask_each_time": return (settings = { ...settings, folder: null });
@@ -45,8 +60,15 @@ export async function mockInvoke<T>(cmd: string, args: Record<string, unknown> =
   return result as T;
 }
 
-export async function mockSave(update: (p: TransferProgress) => void): Promise<SaveResult> {
-  for (let bytes = 0; bytes <= 40e6; bytes += 8e6) { update({ bytes, total: null, percent: bytes / 4e5, finalizing: false }); await wait(300); }
+export async function mockSave(job: number, url: string, request: DownloadRequest,
+  update: (p: TransferProgress) => void): Promise<SaveResult | null> {
+  if (url.includes("2222")) { await wait(400); throw "Loom asked us to slow down. Try again later."; }
+  for (let bytes = 0; bytes <= 40e6; bytes += 8e6) {
+    if (canceled.has(job) || canceled.has(-1)) { canceled.delete(job); return null; }
+    update({ bytes, total: null, percent: bytes / 4e5, finalizing: false }); await wait(300);
+  }
+  history.add(idOf(url));
+  void request;
   update({ bytes: 40e6, total: 40e6, percent: null, finalizing: true });
   await wait(300);
   const dir = override ?? settings.folder ?? "C:\\Users\\you\\Downloads";

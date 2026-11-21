@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, FolderOpen, RotateCcw, TriangleAlert } from "lucide-react";
 import {
-  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, saveOptions, setOptions, setRetries, setTheme,
+  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, saveOptions, setBatch, setOptions, setRetries, setTheme,
   type AppInfo, type Collision, type Content, type FileNaming, type Quality, type SaveOptions, type Settings, type Theme,
 } from "@/api/tauri";
 import { Button } from "@/components/ui/button";
@@ -151,10 +151,24 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
             {[0, 1, 2, 3].map(n => <NativeSelectOption key={n} value={n}>{n === 0 ? "Don’t retry" : `${n} time${n > 1 ? "s" : ""}`}</NativeSelectOption>)}
           </NativeSelect>
         </SettingRow>
-        <SettingRow title="Concurrent downloads" description="Loom Archive downloads one recording at a time.">
-          <NativeSelect aria-label="Concurrent downloads" value="1" disabled className="w-full">
-            <NativeSelectOption value="1">1 (not adjustable)</NativeSelectOption>
+        <SettingRow title="Batch downloads at once" description="How many recordings a batch downloads in parallel. Upstream uses 5.">
+          <NativeSelect aria-label="Batch downloads at once" value={String(settings.concurrency)} className="w-full"
+            onChange={e => void apply(setBatch(Number(e.target.value), settings.batchDelaySecs, settings.skipDownloaded))}>
+            {[1, 2, 3, 4, 5].map(n => <NativeSelectOption key={n} value={n}>{n}</NativeSelectOption>)}
           </NativeSelect>
+        </SettingRow>
+        <SettingRow title="Pause between batch downloads" description="Waits after each finished download, like upstream’s --timeout.">
+          <NativeSelect aria-label="Pause between batch downloads" value={String(settings.batchDelaySecs)} className="w-full"
+            onChange={e => void apply(setBatch(settings.concurrency, Number(e.target.value), settings.skipDownloaded))}>
+            {[0, 2, 5, 10, 30, 60].map(n => <NativeSelectOption key={n} value={n}>{n === 0 ? "No pause" : `${n} seconds`}</NativeSelectOption>)}
+          </NativeSelect>
+        </SettingRow>
+        <SettingRow title="Skip recordings already downloaded" description="Batches skip links saved before, like upstream’s downloaded.log.">
+          <div className="flex items-center gap-2">
+            <Switch id="skip-downloaded" checked={settings.skipDownloaded}
+              onCheckedChange={skip => void apply(setBatch(settings.concurrency, settings.batchDelaySecs, skip))} />
+            <Label htmlFor="skip-downloaded" className="font-normal">{settings.skipDownloaded ? "On" : "Off"}</Label>
+          </div>
         </SettingRow>
         <SettingRow title="Diagnostic logging" description="Not available yet. Download errors are shown in the app.">
           <div className="flex items-center gap-2">

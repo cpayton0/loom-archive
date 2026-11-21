@@ -65,6 +65,8 @@ pub(crate) enum Expect {
 
 #[derive(Debug, Default, Serialize)]
 pub struct SavedFiles {
+    /// The recording ID, for callers that keep a download history.
+    pub id: String,
     pub files: Vec<PathBuf>,
     pub notes: Vec<String>,
 }
@@ -152,6 +154,8 @@ pub struct SaveRequest {
     pub ffmpeg: Option<PathBuf>,
     /// Extra attempts after an interrupted media transfer.
     pub retries: u8,
+    /// Batch numbering, upstream's `--prefix`: files become `<prefix>-<n>-<name>`.
+    pub prefix: Option<(String, usize)>,
 }
 
 fn custom_base(name: &str) -> Result<String, SaveError> {
@@ -298,6 +302,13 @@ pub async fn save_recording(
             .unwrap_or_else(|| page.video.id.clone()),
         FileNaming::Id => page.video.id.clone(),
     });
+    let base = match &request.prefix {
+        Some((prefix, n)) => {
+            let prefix = sanitize_filename(prefix).ok_or(SaveError::InvalidFileName)?;
+            format!("{prefix}-{n}-{base}")
+        }
+        None => base,
+    };
     // Captions the page does not list are dropped up front, so a leftover
     // `.captions.vtt` cannot cause a collision for a file that won't be written.
     let mut early_notes = Vec::new();
@@ -327,6 +338,7 @@ pub async fn save_recording(
 
     let mut saved = SavedFiles {
         notes: early_notes,
+        id: page.video.id.clone(),
         ..SavedFiles::default()
     };
     if let Some(path) = plan.media.take() {
