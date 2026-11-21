@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, FolderOpen, RotateCcw, TriangleAlert } from "lucide-react";
 import {
-  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, saveOptions, setBatch, setOptions, setRetries, setTheme,
+  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, saveOptions, setBatch, setOptions, setResume, setRetries, setTheme,
   type AppInfo, type Collision, type Content, type FileNaming, type Quality, type SaveOptions, type Settings, type Theme,
 } from "@/api/tauri";
 import { Button } from "@/components/ui/button";
@@ -143,6 +143,12 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
               {settings.ffmpeg && <Button variant="ghost" size="sm" onClick={() => apply(autoFfmpeg())}>
                 <RotateCcw aria-hidden="true" /> Use automatic</Button>}
             </div>
+          </div>
+        </SettingRow>
+        <SettingRow title="Resume interrupted downloads" description="Keeps a partial direct-MP4 download and continues it on the next attempt, like upstream’s --resume. HLS downloads always restart.">
+          <div className="flex items-center gap-2">
+            <Switch id="resume" checked={settings.resume} onCheckedChange={resume => void apply(setResume(resume))} />
+            <Label htmlFor="resume" className="font-normal">{settings.resume ? "On" : "Off"}</Label>
           </div>
         </SettingRow>
         <SettingRow title="Retry interrupted downloads" description="Extra attempts when the connection drops during a transfer.">

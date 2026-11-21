@@ -11,6 +11,7 @@
     "allow-set-theme",
     "allow-set-retries",
     "allow-set-batch",
+    "allow-set-resume",
     "allow-downloaded",
     "allow-open-link-list",
     "allow-choose-folder",

@@ -54,6 +54,8 @@ struct Settings {
     batch_delay_secs: u16,
     /// Skip links already in the download history (upstream `downloaded.log`).
     skip_downloaded: bool,
+    /// Continue interrupted direct-MP4 downloads (upstream `--resume`, on by default).
+    resume: bool,
     #[serde(flatten)]
     options: SaveOptions,
 }
@@ -68,6 +70,7 @@ impl Default for Settings {
             concurrency: 2,
             batch_delay_secs: 5,
             skip_downloaded: true,
+            resume: true,
             options: SaveOptions::default(),
         }
     }
@@ -286,6 +289,11 @@ fn parse_link_list(text: &str) -> Vec<String> {
 }
 
 #[tauri::command]
+fn set_resume(store: State<'_, SettingsStore>, resume: bool) -> Result<Settings, String> {
+    store.update(|s| s.resume = resume)
+}
+
+#[tauri::command]
 fn set_retries(store: State<'_, SettingsStore>, retries: u8) -> Result<Settings, String> {
     store.update(|s| s.retries = retries.min(MAX_RETRIES))
 }
@@ -447,7 +455,7 @@ async fn save_recording<R: tauri::Runtime>(
         .clone();
     let token = CancellationToken::new();
     let _active = state.start(job, token.clone())?;
-    let folder = match chosen.or(settings.folder) {
+    let folder = match chosen.or(settings.folder.clone()) {
         Some(folder) if folder.is_dir() => folder,
         Some(_) => return Err("The destination folder no longer exists. Choose another.".into()),
         None => match pick_folder(&window, "Choose an archive folder").await {
@@ -455,13 +463,7 @@ async fn save_recording<R: tauri::Runtime>(
             None => return Ok(None),
         },
     };
-    let request = SaveRequest {
-        options: request.options,
-        file_name: request.file_name,
-        ffmpeg: settings.ffmpeg,
-        retries: settings.retries.min(MAX_RETRIES),
-        prefix: batch_prefix(request.prefix, request.index),
-    };
+    let request = save_request(settings, request);
     let notify = |value| {
         if progress.send(value).is_err() {
             token.cancel();
@@ -525,6 +527,18 @@ fn cancel_save(state: State<'_, Downloads>, job: Option<u32>) -> Result<(), Stri
     state.cancel(job)
 }
 
+/// Combines the stored settings with one download's choices.
+fn save_request(settings: Settings, request: DownloadRequest) -> SaveRequest {
+    SaveRequest {
+        options: request.options,
+        file_name: request.file_name,
+        ffmpeg: settings.ffmpeg,
+        retries: settings.retries.min(MAX_RETRIES),
+        prefix: batch_prefix(request.prefix, request.index),
+        resume: settings.resume,
+    }
+}
+
 /// Batch numbering from the UI; a blank prefix means no numbering.
 fn batch_prefix(prefix: Option<String>, index: Option<usize>) -> Option<(String, usize)> {
     prefix.filter(|p| !p.trim().is_empty()).zip(index)
@@ -569,6 +583,7 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
             set_theme,
             set_retries,
             set_batch,
+            set_resume,
             downloaded,
             open_link_list,
             choose_folder,
@@ -655,6 +670,7 @@ mod tests {
     fn old_settings_files_get_batch_defaults() {
         let settings: Settings = serde_json::from_str(r#"{"retries":1}"#).unwrap();
         assert_eq!((settings.concurrency, settings.batch_delay_secs, settings.skip_downloaded), (2, 5, true));
+        assert!(settings.resume);
     }
 
     #[test]
@@ -694,6 +710,24 @@ mod tests {
         ]
         .map(String::from);
         assert_eq!(downloaded_flags(&history, &urls), [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn settings_reach_each_download_request() {
+        let request = || DownloadRequest {
+            options: SaveOptions::default(),
+            file_name: Some("x".into()),
+            prefix: Some("p".into()),
+            index: Some(2),
+        };
+        for resume in [true, false] {
+            let settings = Settings { resume, retries: 9, ..Settings::default() };
+            let built = save_request(settings, request());
+            assert_eq!(built.resume, resume);
+            assert_eq!(built.retries, MAX_RETRIES);
+            assert_eq!(built.prefix, Some(("p".into(), 2)));
+            assert_eq!(built.file_name.as_deref(), Some("x"));
+        }
     }
 
     #[test]

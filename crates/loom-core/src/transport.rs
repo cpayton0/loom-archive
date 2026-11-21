@@ -162,14 +162,46 @@ pub(crate) fn checked_media_host(url: &Url) -> Result<&'static str, AnalyzeError
     }
 }
 
-pub(crate) async fn fetch_media(url: Url) -> Result<reqwest::Response, AnalyzeError> {
-    let response = pinned_client(checked_media_host(&url)?)
-        .await?
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| AnalyzeError::Network)?;
+/// GET a media file, asking for the bytes from `offset` on when resuming.
+/// With an offset, `206 Partial Content` and `416 Range Not Satisfiable` are
+/// returned to the caller to decide; everything else is validated as usual.
+pub(crate) async fn fetch_media_from(
+    url: Url,
+    offset: u64,
+    if_range: Option<String>,
+) -> Result<reqwest::Response, AnalyzeError> {
+    let mut request = pinned_client(checked_media_host(&url)?).await?.get(url);
+    for (name, value) in range_headers(offset, if_range) {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.map_err(|_| AnalyzeError::Network)?;
+    if passes_through(offset, response.status()) {
+        return Ok(response);
+    }
     validate_media_response(response).await
+}
+
+/// `Range` from `offset`, and `If-Range` so a changed file comes back whole.
+fn range_headers(
+    offset: u64,
+    if_range: Option<String>,
+) -> Vec<(reqwest::header::HeaderName, String)> {
+    if offset == 0 {
+        return Vec::new();
+    }
+    let mut headers = vec![(reqwest::header::RANGE, format!("bytes={offset}-"))];
+    headers.extend(if_range.map(|v| (reqwest::header::IF_RANGE, v)));
+    headers
+}
+
+/// Range replies the resume logic handles itself; everything else is checked
+/// like any other media response.
+fn passes_through(offset: u64, status: StatusCode) -> bool {
+    offset > 0
+        && matches!(
+            status,
+            StatusCode::PARTIAL_CONTENT | StatusCode::RANGE_NOT_SATISFIABLE
+        )
 }
 
 /// GET a Loom media host with the Referer and browser User-Agent upstream sends
@@ -363,6 +395,20 @@ mod tests {
         assert!(parse_seek_preview(&body("https://127.0.0.1/i.vtt")).is_none());
         assert!(parse_seek_preview(&body("http://cdn.loom.com/i.vtt")).is_none());
         assert!(parse_seek_preview(&serde_json::json!({"errors":[{}]})).is_none());
+    }
+
+    #[test]
+    fn resume_requests_ask_for_the_rest_of_the_same_file() {
+        assert!(range_headers(0, Some("\"e\"".into())).is_empty());
+        let headers = range_headers(100, Some("\"etag-1\"".into()));
+        assert_eq!(headers[0], (reqwest::header::RANGE, "bytes=100-".to_string()));
+        assert_eq!(headers[1], (reqwest::header::IF_RANGE, "\"etag-1\"".to_string()));
+        assert_eq!(range_headers(5, None).len(), 1);
+        assert!(passes_through(1, StatusCode::PARTIAL_CONTENT));
+        assert!(passes_through(1, StatusCode::RANGE_NOT_SATISFIABLE));
+        assert!(!passes_through(0, StatusCode::RANGE_NOT_SATISFIABLE));
+        assert!(!passes_through(0, StatusCode::PARTIAL_CONTENT));
+        assert!(!passes_through(1, StatusCode::FORBIDDEN));
     }
 
     #[test]
