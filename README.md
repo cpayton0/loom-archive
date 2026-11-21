@@ -29,11 +29,14 @@ Install Node.js 22.12+ (or 24 LTS), pnpm 11.24, and stable Rust 1.94 or newer. O
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm fetch-ffmpeg   # once: downloads the pinned LGPL FFmpeg into src-tauri/binaries
 cargo test
 pnpm tauri dev
 ```
 
-To build a standalone desktop executable, run `pnpm tauri build --no-bundle`. On Windows it is written to `target/release/loom-archive.exe`. The frontend assets are embedded in the executable. Node.js and pnpm are development tools.
+`pnpm fetch-ffmpeg` runs `scripts/fetch-ffmpeg.ps1`, which downloads the pinned build, checks its SHA-256, refuses builds configured with `--enable-gpl` or `--enable-nonfree`, and checks for the `https`, `tls` and `crypto` protocols. Tauri needs that file to build the app, including for `cargo test`.
+
+To build the installer, run `pnpm tauri build`. It writes `target/release/bundle/nsis/Loom Archive_<version>_x64-setup.exe`, a per-user installer that places `loom-archive.exe`, `ffmpeg.exe` and the license texts in the install folder. `pnpm tauri build --no-bundle` builds only `target/release/loom-archive.exe` (with `ffmpeg.exe` copied beside it). The frontend assets are embedded in the executable. Node.js and pnpm are development tools.
 
 ## Tests
 
@@ -45,7 +48,7 @@ The analyzer accepts HTTPS links on `loom.com` or `www.loom.com` to `/share/<id>
 
 Downloads follow [EcomGraduates/loom-downloader](https://github.com/EcomGraduates/loom-downloader). Rust fetches the share page and reads the HLS stream that Loom supplies to its player from `window.__APOLLO_STATE__`. That stream is the requested recording's `M3U8` field, its playlist URL and CloudFront credentials. FFmpeg receives the playlist URL with a `Referer: https://www.loom.com/` header and the credentials as `CloudFront-*` cookies. It runs with `-c copy -bsf:a aac_adtstoasc -movflags +faststart`, which selects the video rendition and the separate audio rendition and copies both into one MP4 without re-encoding. When the page reports no HLS stream, the app falls back to a direct `cdn.loom.com` MP4 for that recording. **Open in Loom** opens the canonical recording in your default browser.
 
-HLS downloads need FFmpeg on PATH or beside the Loom Archive executable. Playlist hosts are limited to Loom's media hosts, and FFmpeg is restricted to the `https`, `tls`, `tcp` and `crypto` protocols. An FFmpeg HTTP 401, 403 or 404 response is reported as a typed error.
+The installer bundles FFmpeg (an LGPL v3+ build; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) next to `loom-archive.exe`, which is where the app looks first; a custom `ffmpeg.exe` chosen in Settings takes precedence, and FFmpeg on PATH is the last resort. Playlist hosts are limited to Loom's media hosts, and FFmpeg is restricted to the `https`, `tls`, `tcp` and `crypto` protocols. An FFmpeg HTTP 401, 403 or 404 response is reported as a typed error.
 
 The app writes a temporary file beside the destination, checks its container and video samples, then saves it under the chosen name. Existing files are preserved. With **Resume interrupted downloads** on (Settings → Advanced, the default, like upstream's `--resume`), a direct MP4 whose connection drops is kept as `.loom-<id>.mp4.part`, with the file's size and ETag (or Last-Modified) in a `.meta` file beside it. The next attempt (an automatic retry or a later download of the same recording to the same folder within a week) asks for the remaining bytes with `Range` and `If-Range`, and appends them only when the server answers `206` with a `Content-Range` that continues the partial and matches the recorded size. A changed file, an unusable reply, a partial without metadata or one older than a week starts over. Canceling at any stage and files that fail verification delete the partial. HLS downloads always restart because FFmpeg reads the playlist from the beginning.
 
