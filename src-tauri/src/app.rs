@@ -372,6 +372,20 @@ fn write_diagnostics(
     Ok(())
 }
 
+/// Writes the log when the download collected one; `false` when it didn't.
+fn finish_diagnostics(
+    dir: Option<&Path>,
+    job: u32,
+    id: &str,
+    diagnostics: Option<&loom_core::Diagnostics>,
+    outcome: &str,
+) -> bool {
+    match (dir, diagnostics) {
+        (Some(dir), Some(d)) => write_diagnostics(dir, job, id, d, outcome).is_ok(),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 fn set_resume(store: State<'_, SettingsStore>, resume: bool) -> Result<Settings, String> {
     store.update(|s| s.resume = resume)
@@ -561,15 +575,15 @@ async fn save_recording<R: tauri::Runtime>(
         finalizing: false,
     });
     let result = loom_core::save_recording(share.as_ref(), &folder, &request, &token, notify).await;
-    if let (Some(diagnostics), Some(dir)) = (&request.diagnostics, log_dir(&app)) {
+    if request.diagnostics.is_some() {
         let id = share.path().trim_start_matches("/share/").to_owned();
         let outcome = match &result {
             Ok(saved) => format!("saved {} file(s)", saved.files.len()),
             Err(e) => e.to_string(),
         };
-        let diagnostics = diagnostics.clone();
+        let (dir, diagnostics) = (log_dir(&app), request.diagnostics.clone());
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            write_diagnostics(&dir, job, &id, &diagnostics, &outcome)
+            finish_diagnostics(dir.as_deref(), job, &id, diagnostics.as_ref(), &outcome)
         })
         .await;
     }
@@ -839,6 +853,25 @@ mod tests {
         ]
         .map(String::from);
         assert_eq!(downloaded_flags(&history, &urls), [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn logs_are_collected_and_written_only_when_the_setting_is_on() {
+        let request = || DownloadRequest {
+            options: SaveOptions::default(),
+            file_name: None,
+            prefix: None,
+            index: None,
+        };
+        let off = save_request(Settings::default(), request());
+        let on = save_request(Settings { diagnostics: true, ..Settings::default() }, request());
+        assert!(off.diagnostics.is_none() && on.diagnostics.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!finish_diagnostics(Some(dir.path()), 1, "a", off.diagnostics.as_ref(), "x"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(finish_diagnostics(Some(dir.path()), 1, "a", on.diagnostics.as_ref(), "saved"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(!finish_diagnostics(None, 1, "a", on.diagnostics.as_ref(), "x"));
     }
 
     #[test]

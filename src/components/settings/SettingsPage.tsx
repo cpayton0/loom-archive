@@ -177,7 +177,7 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
           </div>
         </SettingRow>
         <SettingRow title="Diagnostic logging"
-          description={<>Saves a log of each download (options, FFmpeg commands and errors, retries) and a copy of the share page, like upstream’s --verbose. Cookies and signed links are removed from the log, but the page copy can contain short-lived media links, so share logs with care. The newest 40 logs are kept.</>}>
+          description={<>Saves a log of each download (options, FFmpeg commands and errors, retries) and a copy of the share page, like upstream’s --verbose. CloudFront cookies and credentials, signed link parameters and your Windows profile folder are removed from both, but logs still show recording titles, file names and folder names, so share them with care. The newest 40 logs are kept.</>}>
           <div className="grid gap-2">
             <div className="flex items-center gap-2">
               <Switch id="logging" checked={settings.diagnostics} onCheckedChange={on => void apply(setDiagnostics(on))} />

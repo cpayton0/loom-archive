@@ -1361,6 +1361,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_direct_path_logs_its_resume_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("rec.mp4");
+        let d = crate::Diagnostics::default();
+        let (result, _) = crate::diagnostics::scope(Some(d.clone()), direct(&dest, true, vec![Ok(whole("\"v\""))])).await;
+        result.unwrap();
+        assert!(d.lines().iter().any(|l| l.starts_with("Direct MP4: partial 0 bytes, reply 200")), "{:?}", d.lines());
+    }
+
+    #[tokio::test]
     async fn partials_without_metadata_old_ones_or_with_resume_off_restart() {
         let half = VIDEO.len() / 2;
         // No metadata: the bytes cannot be trusted, so nothing is continued.
