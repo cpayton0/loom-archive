@@ -70,6 +70,10 @@ pub struct SaveOptions {
     pub thumbnail: bool,
     /// Also save `<name>.captions.vtt`. Upstream lists captions but never saves them.
     pub captions: bool,
+    /// Also save `<name>-thumbnail.gif` (upstream `--gif`).
+    pub gif: bool,
+    /// Also save `<name>-seek-preview.jpg` and `.vtt` (upstream `--seek-preview`).
+    pub seek_preview: bool,
     pub collision: Collision,
 }
 
@@ -118,5 +122,8 @@ mod tests {
         assert_eq!(options.quality, Quality::P720);
         assert_eq!(options.content, Content::AudioOnly);
         assert_eq!(options.naming, FileNaming::Id);
+        let extras: SaveOptions =
+            serde_json::from_str(r#"{"gif":true,"seekPreview":true,"captions":true}"#).unwrap();
+        assert!(extras.gif && extras.seek_preview && extras.captions);
     }
 }

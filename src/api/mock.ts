@@ -6,7 +6,7 @@ let settings: Settings = {
   theme: "dark",
   folder: "C:\\Users\\you\\Videos\\Loom Archive\\Customer calls\\2026",
   ffmpeg: null, retries: 1,
-  naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, captions: false, collision: "stop",
+  naming: "title", content: "video", quality: "auto", transcript: true, thumbnail: false, captions: false, gif: false, seekPreview: false, collision: "stop",
 };
 let override: string | null = null;
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));

@@ -79,6 +79,16 @@ export function DownloadOptions({ options, transcriptListed, captionsListed, dis
           onCheckedChange={v => onChange({ thumbnail: v === true })} />
         <Label htmlFor="also-thumbnail" className="cursor-pointer py-1 font-normal">Save thumbnail</Label>
       </div>
+      <div className="flex items-center gap-2">
+        <Checkbox id="also-gif" checked={options.gif} disabled={disabled}
+          onCheckedChange={v => onChange({ gif: v === true })} />
+        <Label htmlFor="also-gif" className="cursor-pointer py-1 font-normal">Save GIF preview</Label>
+      </div>
+      <div className="flex items-center gap-2">
+        <Checkbox id="also-seek" checked={options.seekPreview} disabled={disabled}
+          onCheckedChange={v => onChange({ seekPreview: v === true })} />
+        <Label htmlFor="also-seek" className="cursor-pointer py-1 font-normal">Save seek preview</Label>
+      </div>
     </div>
   </div>;
 }

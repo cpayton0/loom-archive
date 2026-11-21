@@ -225,6 +225,39 @@ pub(crate) async fn validate_media_response(
     Ok(response)
 }
 
+/// Upstream's `GetVideoSeekPreview` fallback: the signed WebVTT index URL.
+pub(crate) async fn seek_preview_vtt(id: &str) -> Result<Option<Url>, AnalyzeError> {
+    let payload = serde_json::json!({
+        "operationName": "GetVideoSeekPreview",
+        "variables": {"videoId": id, "trimId": null, "password": null},
+        "query": "query GetVideoSeekPreview($videoId: ID!, $trimId: String, $password: String) { getVideo(id: $videoId, password: $password) { ... on RegularUserVideo { id seekPreviewCdnUrl(trimId: $trimId) __typename } __typename } }"
+    });
+    let response = pinned_client(HOST)
+        .await?
+        .post("https://www.loom.com/graphql")
+        .header("Content-Type", "application/json")
+        .header("Accept", "*/*")
+        .header("Origin", "https://www.loom.com")
+        .header("Referer", format!("https://www.loom.com/share/{id}"))
+        .header("User-Agent", BROWSER_UA)
+        .header("apollographql-client-name", "web")
+        .timeout(Duration::from_secs(15))
+        .body(payload.to_string())
+        .send()
+        .await
+        .map_err(|_| AnalyzeError::Network)?;
+    check_status(response.status())?;
+    let body: serde_json::Value = serde_json::from_slice(&read_limited(response, 65536).await?)
+        .map_err(|_| AnalyzeError::PageFormat)?;
+    Ok(parse_seek_preview(&body))
+}
+
+fn parse_seek_preview(body: &serde_json::Value) -> Option<Url> {
+    let url = Url::parse(body["data"]["getVideo"]["seekPreviewCdnUrl"].as_str()?).ok()?;
+    checked_media_host(&url).ok()?;
+    Some(url)
+}
+
 pub(crate) async fn fetch_page(url: Url) -> Result<String, AnalyzeError> {
     let network = AnalyzeError::Network;
     let mut response = pinned_client(HOST)
@@ -321,6 +354,15 @@ mod tests {
                 "{link}"
             );
         }
+    }
+
+    #[test]
+    fn seek_preview_fallback_accepts_only_loom_media_hosts() {
+        let body = |url: &str| serde_json::json!({"data":{"getVideo":{"seekPreviewCdnUrl": url}}});
+        assert!(parse_seek_preview(&body("https://cdn.loom.com/mediametadata/seekpreview/a/i.vtt?s=1")).is_some());
+        assert!(parse_seek_preview(&body("https://127.0.0.1/i.vtt")).is_none());
+        assert!(parse_seek_preview(&body("http://cdn.loom.com/i.vtt")).is_none());
+        assert!(parse_seek_preview(&serde_json::json!({"errors":[{}]})).is_none());
     }
 
     #[test]
