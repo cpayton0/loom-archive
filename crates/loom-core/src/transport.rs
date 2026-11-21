@@ -14,6 +14,10 @@ pub(crate) const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_1
 /// The recording ID in a `share/` or `embed/` path segment: the whole segment,
 /// or the end of a title slug such as `Weekly-sync-<id>`.
 fn recording_id(segment: &str) -> Option<&str> {
+    // The raw path can hold any text; byte slicing below needs ASCII.
+    if !segment.is_ascii() {
+        return None;
+    }
     let hex = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
     if hex(segment) {
         return Some(segment);
@@ -291,6 +295,8 @@ mod tests {
             format!("https://loom.com/share/a/b-{ID}"),
             format!("https://loom.com/share/{ID}0"),
             format!("https://loom.com/v/{ID}"),
+            "https://loom.com/share/€€€€€€€€€€€".into(),
+            format!("https://loom.com/share/é-{ID}"),
             format!("https:\\\\evil.invalid\\share\\{ID}"),
         ] {
             let result =

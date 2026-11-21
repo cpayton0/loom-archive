@@ -294,6 +294,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn captions_and_transcript_urls_come_from_their_own_fields() {
+        let share = Url::parse("https://www.loom.com/share/00112233445566778899aabbccddeeff").unwrap();
+        let info = inspect_page(&share, include_str!("../tests/fixtures/hls.html")).unwrap();
+        assert_eq!(
+            info.captions.unwrap().as_str(),
+            "https://cdn.loom.com/example/captions.vtt"
+        );
+        assert_eq!(
+            info.transcript.unwrap().as_str(),
+            "https://cdn.loom.com/example/transcript.json"
+        );
+    }
+
+    #[test]
     fn credentials_become_cloudfront_cookies_and_reject_injection() {
         let creds = serde_json::json!({"Policy":"eyJ-p_","Signature":"s~ig","KeyPairId":"K2"});
         assert_eq!(

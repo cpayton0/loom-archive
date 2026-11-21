@@ -454,7 +454,7 @@ mod tests {
             .map(String::from)
             .to_vec();
         let playlist = hls.join("master.m3u8").display().to_string();
-        let job = Job::single(local.clone(), &playlist);
+        let job = Job::single(local.clone(), &playlist).duration(Some(3.0));
         let out = dir.path().join("out");
         std::fs::create_dir(&out).unwrap();
         let dest = out.join("rec.mp4");
@@ -465,12 +465,15 @@ mod tests {
         assert_eq!(out.read_dir().unwrap().count(), 0);
 
         let last = std::cell::Cell::new(None);
+        let peak = std::cell::Cell::new(0.0_f64);
         save_with(&exe, &job, Expect::Video, &dest, &CancellationToken::new(), |p| {
+            peak.set(peak.get().max(p.percent.unwrap_or(0.0)));
             last.set(Some(p))
         })
         .await
         .unwrap();
         assert!(last.get().is_some_and(|p| p.finalizing));
+        assert!(peak.get() > 50.0 && peak.get() <= 100.0, "peak {}", peak.get());
         assert_eq!(out.read_dir().unwrap().count(), 1);
         let probe = std::process::Command::new(&exe)
             .args(["-v", "error", "-xerror", "-i"])
