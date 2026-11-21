@@ -56,6 +56,8 @@ struct Settings {
     skip_downloaded: bool,
     /// Continue interrupted direct-MP4 downloads (upstream `--resume`, on by default).
     resume: bool,
+    /// Write a redacted log and the share page for each download (upstream `--verbose`).
+    diagnostics: bool,
     #[serde(flatten)]
     options: SaveOptions,
 }
@@ -71,6 +73,7 @@ impl Default for Settings {
             batch_delay_secs: 5,
             skip_downloaded: true,
             resume: true,
+            diagnostics: false,
             options: SaveOptions::default(),
         }
     }
@@ -289,6 +292,101 @@ fn parse_link_list(text: &str) -> Vec<String> {
 }
 
 #[tauri::command]
+fn set_diagnostics(store: State<'_, SettingsStore>, diagnostics: bool) -> Result<Settings, String> {
+    store.update(|s| s.diagnostics = diagnostics)
+}
+
+fn log_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    app.path().app_log_dir().ok()
+}
+
+#[tauri::command]
+async fn open_log_folder<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    let dir = log_dir(&app).ok_or("The log folder is unavailable.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|_| "Could not create the log folder.")?;
+        open::that(&dir).map_err(|_| "Could not open the log folder.")
+    })
+    .await
+    .map_err(|_| "Could not open the log folder.")?
+    .map_err(String::from)
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC, so log names sort by time.
+fn timestamp(now: std::time::SystemTime) -> String {
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+const KEEP_LOG_FILES: usize = 40;
+
+/// Writes `<time>-<job>-<id>.log` (and `-page.html`), keeping the newest logs.
+fn write_diagnostics(
+    dir: &Path,
+    job: u32,
+    id: &str,
+    diagnostics: &loom_core::Diagnostics,
+    outcome: &str,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let stem = format!("{}-{job}-{id}", timestamp(std::time::SystemTime::now()));
+    let mut text = diagnostics.lines().join("\n");
+    text.push_str("\nOutcome: ");
+    text.push_str(outcome);
+    text.push('\n');
+    std::fs::write(dir.join(format!("{stem}.log")), text)?;
+    if let Some(page) = diagnostics.page() {
+        std::fs::write(dir.join(format!("{stem}-page.html")), page)?;
+    }
+    let mut logs: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .collect();
+    logs.sort();
+    let excess = logs.len().saturating_sub(KEEP_LOG_FILES);
+    for old in &logs[..excess] {
+        let _ = std::fs::remove_file(old);
+        if let Some(stem) = old.file_stem().and_then(|s| s.to_str()) {
+            let _ = std::fs::remove_file(old.with_file_name(format!("{stem}-page.html")));
+        }
+    }
+    Ok(())
+}
+
+/// Writes the log when the download collected one; `false` when it didn't.
+fn finish_diagnostics(
+    dir: Option<&Path>,
+    job: u32,
+    id: &str,
+    diagnostics: Option<&loom_core::Diagnostics>,
+    outcome: &str,
+) -> bool {
+    match (dir, diagnostics) {
+        (Some(dir), Some(d)) => write_diagnostics(dir, job, id, d, outcome).is_ok(),
+        _ => false,
+    }
+}
+
+#[tauri::command]
 fn set_resume(store: State<'_, SettingsStore>, resume: bool) -> Result<Settings, String> {
     store.update(|s| s.resume = resume)
 }
@@ -436,6 +534,7 @@ struct DownloadRequest {
 
 #[tauri::command]
 async fn save_recording<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     window: tauri::WebviewWindow<R>,
     state: State<'_, Downloads>,
     store: State<'_, SettingsStore>,
@@ -475,7 +574,20 @@ async fn save_recording<R: tauri::Runtime>(
         percent: None,
         finalizing: false,
     });
-    match loom_core::save_recording(share.as_ref(), &folder, &request, &token, notify).await {
+    let result = loom_core::save_recording(share.as_ref(), &folder, &request, &token, notify).await;
+    if request.diagnostics.is_some() {
+        let id = share.path().trim_start_matches("/share/").to_owned();
+        let outcome = match &result {
+            Ok(saved) => format!("saved {} file(s)", saved.files.len()),
+            Err(e) => e.to_string(),
+        };
+        let (dir, diagnostics) = (log_dir(&app), request.diagnostics.clone());
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            finish_diagnostics(dir.as_deref(), job, &id, diagnostics.as_ref(), &outcome)
+        })
+        .await;
+    }
+    match result {
         Ok(saved) => Ok(Some({
             history.record(&saved.id);
             SaveResult {
@@ -536,6 +648,7 @@ fn save_request(settings: Settings, request: DownloadRequest) -> SaveRequest {
         retries: settings.retries.min(MAX_RETRIES),
         prefix: batch_prefix(request.prefix, request.index),
         resume: settings.resume,
+        diagnostics: settings.diagnostics.then(loom_core::Diagnostics::default),
     }
 }
 
@@ -584,6 +697,8 @@ fn with_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
             set_retries,
             set_batch,
             set_resume,
+            set_diagnostics,
+            open_log_folder,
             downloaded,
             open_link_list,
             choose_folder,
@@ -667,10 +782,38 @@ mod tests {
     }
 
     #[test]
+    fn log_names_sort_by_utc_time() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(timestamp(UNIX_EPOCH), "19700101-000000");
+        assert_eq!(timestamp(UNIX_EPOCH + Duration::from_secs(951_782_400)), "20000229-000000");
+        assert_eq!(timestamp(UNIX_EPOCH + Duration::from_secs(1_795_230_426)), "20261121-030706");
+    }
+
+    #[test]
+    fn diagnostics_are_written_and_old_logs_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 0..KEEP_LOG_FILES + 3 {
+            std::fs::write(dir.path().join(format!("19990101-0000{n:02}-1-x.log")), "old").unwrap();
+            std::fs::write(dir.path().join(format!("19990101-0000{n:02}-1-x-page.html")), "old").unwrap();
+        }
+        let diagnostics = loom_core::Diagnostics::default();
+        write_diagnostics(dir.path(), 7, "abc", &diagnostics, "saved 1 file(s)").unwrap();
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.iter().filter(|n| n.ends_with(".log")).count(), KEEP_LOG_FILES);
+        assert!(names.iter().any(|n| n.ends_with("-7-abc.log")));
+        assert!(!names.iter().any(|n| n.starts_with("19990101-000000")));
+        let log = names.iter().find(|n| n.ends_with("-7-abc.log")).unwrap();
+        assert!(std::fs::read_to_string(dir.path().join(log)).unwrap().ends_with("Outcome: saved 1 file(s)\n"));
+    }
+
+    #[test]
     fn old_settings_files_get_batch_defaults() {
         let settings: Settings = serde_json::from_str(r#"{"retries":1}"#).unwrap();
         assert_eq!((settings.concurrency, settings.batch_delay_secs, settings.skip_downloaded), (2, 5, true));
-        assert!(settings.resume);
+        assert!(settings.resume && !settings.diagnostics);
     }
 
     #[test]
@@ -710,6 +853,25 @@ mod tests {
         ]
         .map(String::from);
         assert_eq!(downloaded_flags(&history, &urls), [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn logs_are_collected_and_written_only_when_the_setting_is_on() {
+        let request = || DownloadRequest {
+            options: SaveOptions::default(),
+            file_name: None,
+            prefix: None,
+            index: None,
+        };
+        let off = save_request(Settings::default(), request());
+        let on = save_request(Settings { diagnostics: true, ..Settings::default() }, request());
+        assert!(off.diagnostics.is_none() && on.diagnostics.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!finish_diagnostics(Some(dir.path()), 1, "a", off.diagnostics.as_ref(), "x"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert!(finish_diagnostics(Some(dir.path()), 1, "a", on.diagnostics.as_ref(), "saved"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(!finish_diagnostics(None, 1, "a", on.diagnostics.as_ref(), "x"));
     }
 
     #[test]

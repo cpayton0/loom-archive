@@ -159,20 +159,33 @@ async fn run_ffmpeg(
     cancel: &CancellationToken,
     progress: &impl Fn(TransferProgress),
 ) -> Result<(), SaveError> {
+    let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-nostats", "-v", "error"]
+        .into_iter()
+        .chain(["-progress", "pipe:1"])
+        .map(String::from)
+        .collect();
+    for (options, input) in &job.inputs {
+        args.extend(options.iter().cloned());
+        args.extend(["-i".to_string(), input.clone()]);
+    }
+    args.extend(job.maps.iter().cloned());
+    // Same output options as upstream.
+    args.extend(
+        ["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", "-y"]
+            .map(String::from),
+    );
+    crate::diagnostics::log_redacted(|| {
+        format!(
+            "FFmpeg: {} <output>",
+            crate::diagnostics::command_line(&exe.display().to_string(), &args)
+        )
+    });
     let mut cmd = Command::new(exe);
     cmd.kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .args(["-nostdin", "-hide_banner", "-nostats", "-v", "error"])
-        .args(["-progress", "pipe:1"]);
-    for (options, input) in &job.inputs {
-        cmd.args(options).args(["-i", input]);
-    }
-    cmd.args(&job.maps)
-        // Same output options as upstream.
-        .args(["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"])
-        .args(["-f", "mp4", "-y"])
+        .args(&args)
         .arg(out);
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -207,8 +220,18 @@ async fn run_ffmpeg(
     };
     let Some((errors, status)) = outcome else {
         let _ = child.kill().await;
+        crate::diagnostics::log(|| "FFmpeg stopped: canceled".into());
         return Err(SaveError::Canceled);
     };
+    crate::diagnostics::log(|| {
+        let text = String::from_utf8_lossy(&errors);
+        let code = status.as_ref().map_or("not started".into(), |s| s.to_string());
+        if text.trim().is_empty() {
+            format!("FFmpeg finished: {code}")
+        } else {
+            format!("FFmpeg finished: {code}\n--- FFmpeg errors ---\n{}", text.trim_end())
+        }
+    });
     match status {
         Ok(status) if status.success() => Ok(()),
         _ => Err(classify_failure(&String::from_utf8_lossy(&errors))),
@@ -390,6 +413,30 @@ mod tests {
         let unknown = feed(&mut block, &["out_time_us=1000000", "progress=continue"], None).unwrap();
         assert_eq!(unknown.percent, None);
         assert!(Job::single(Vec::new(), "x").duration(Some(f64::NAN)).duration.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_logged_ffmpeg_command_keeps_its_inputs_and_hides_secrets() {
+        let options = stream_options(Some("CloudFront-Signature=SECRET1; CloudFront-Key-Pair-Id=K"));
+        let mut job = Job::single(options.clone(), "https://luna.loom.com/a/v.m3u8?sig=SECRET2");
+        job.inputs.push((options, "https://luna.loom.com/a/a.m3u8?sig=SECRET3".into()));
+        let job = job.maps(&["-map", "0:v:0", "-map", "1:a:0"]);
+        let d = crate::Diagnostics::default();
+        let out = std::env::temp_dir().join("loom-archive-never-written.mp4");
+        let missing = Path::new("loom-archive-missing-ffmpeg.exe");
+        let result = crate::diagnostics::scope(Some(d.clone()), async {
+            run_ffmpeg(missing, &job, &out, &CancellationToken::new(), &|_| {}).await
+        })
+        .await;
+        assert!(matches!(result, Err(SaveError::MissingFfmpeg)));
+        let line = d.lines().into_iter().find(|l| l.starts_with("FFmpeg: ")).unwrap();
+        for kept in ["Cookie: <redacted>", "-i https://luna.loom.com/a/v.m3u8?<redacted>",
+            "-i https://luna.loom.com/a/a.m3u8?<redacted>", "-map 1:a:0", "+faststart"] {
+            assert!(line.contains(kept), "{kept} missing from {line}");
+        }
+        for secret in ["SECRET1", "SECRET2", "SECRET3", "Key-Pair-Id=K"] {
+            assert!(!line.contains(secret), "{secret} in {line}");
+        }
     }
 
     #[test]

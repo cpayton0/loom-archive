@@ -7,6 +7,8 @@ fn main() {
         "set_retries",
         "set_batch",
         "set_resume",
+        "set_diagnostics",
+        "open_log_folder",
         "downloaded",
         "open_link_list",
         "choose_folder",

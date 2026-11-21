@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, FolderOpen, RotateCcw, TriangleAlert } from "lucide-react";
 import {
-  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, saveOptions, setBatch, setOptions, setResume, setRetries, setTheme,
+  appInfo, askEachTime, autoFfmpeg, chooseFfmpeg, chooseFolder, errorMessage, openLogFolder, saveOptions, setBatch, setDiagnostics, setOptions, setResume, setRetries, setTheme,
   type AppInfo, type Collision, type Content, type FileNaming, type Quality, type SaveOptions, type Settings, type Theme,
 } from "@/api/tauri";
 import { Button } from "@/components/ui/button";
@@ -176,11 +176,17 @@ export function SettingsPage({ settings, onSettings }: { settings: Settings; onS
             <Label htmlFor="skip-downloaded" className="font-normal">{settings.skipDownloaded ? "On" : "Off"}</Label>
           </div>
         </SettingRow>
-        <SettingRow title="Diagnostic logging" description="Not available yet. Download errors are shown in the app.">
-          <div className="flex items-center gap-2">
-            <Switch id="logging" checked={false} disabled aria-describedby="logging-note" />
-            <Label htmlFor="logging" className="font-normal text-muted-foreground">Off</Label>
-            <span id="logging-note" className="sr-only">Diagnostic logging is not available in this version.</span>
+        <SettingRow title="Diagnostic logging"
+          description={<>Saves a log of each download (options, FFmpeg commands and errors, retries) and a copy of the share page, like upstream’s --verbose. CloudFront cookies and credentials, signed link parameters and your Windows profile folder are removed from both, but logs still show recording titles, file names and folder names, so share them with care. The newest 40 logs are kept.</>}>
+          <div className="grid gap-2">
+            <div className="flex items-center gap-2">
+              <Switch id="logging" checked={settings.diagnostics} onCheckedChange={on => void apply(setDiagnostics(on))} />
+              <Label htmlFor="logging" className="font-normal">{settings.diagnostics ? "On" : "Off"}</Label>
+            </div>
+            <div>
+              <Button variant="outline" size="sm" onClick={() => openLogFolder().catch(e => setError(errorMessage(e)))}>
+                <FolderOpen aria-hidden="true" /> Open log folder</Button>
+            </div>
           </div>
         </SettingRow>
       </TabsContent>

@@ -76,7 +76,12 @@ where
     Fut: Future<Output = Result<String, AnalyzeError>>,
 {
     let url = normalize_share_url(input)?;
-    let page = fetch(url.clone()).await?;
+    crate::diagnostics::log(|| format!("Fetching share page {url}"));
+    let page = fetch(url.clone()).await.inspect_err(|e| {
+        crate::diagnostics::log(|| format!("Share page request failed: {e:?}"));
+    })?;
+    crate::diagnostics::keep_page(&page);
+    crate::diagnostics::log(|| format!("Share page received: {} bytes", page.len()));
     inspect_page(&url, &page)
 }
 
