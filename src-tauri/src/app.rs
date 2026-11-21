@@ -455,7 +455,7 @@ async fn save_recording<R: tauri::Runtime>(
         .clone();
     let token = CancellationToken::new();
     let _active = state.start(job, token.clone())?;
-    let folder = match chosen.or(settings.folder) {
+    let folder = match chosen.or(settings.folder.clone()) {
         Some(folder) if folder.is_dir() => folder,
         Some(_) => return Err("The destination folder no longer exists. Choose another.".into()),
         None => match pick_folder(&window, "Choose an archive folder").await {
@@ -463,14 +463,7 @@ async fn save_recording<R: tauri::Runtime>(
             None => return Ok(None),
         },
     };
-    let request = SaveRequest {
-        options: request.options,
-        file_name: request.file_name,
-        ffmpeg: settings.ffmpeg,
-        retries: settings.retries.min(MAX_RETRIES),
-        prefix: batch_prefix(request.prefix, request.index),
-        resume: settings.resume,
-    };
+    let request = save_request(settings, request);
     let notify = |value| {
         if progress.send(value).is_err() {
             token.cancel();
@@ -532,6 +525,18 @@ impl Downloads {
 #[tauri::command]
 fn cancel_save(state: State<'_, Downloads>, job: Option<u32>) -> Result<(), String> {
     state.cancel(job)
+}
+
+/// Combines the stored settings with one download's choices.
+fn save_request(settings: Settings, request: DownloadRequest) -> SaveRequest {
+    SaveRequest {
+        options: request.options,
+        file_name: request.file_name,
+        ffmpeg: settings.ffmpeg,
+        retries: settings.retries.min(MAX_RETRIES),
+        prefix: batch_prefix(request.prefix, request.index),
+        resume: settings.resume,
+    }
 }
 
 /// Batch numbering from the UI; a blank prefix means no numbering.
@@ -705,6 +710,24 @@ mod tests {
         ]
         .map(String::from);
         assert_eq!(downloaded_flags(&history, &urls), [true, true, true, false, false]);
+    }
+
+    #[test]
+    fn settings_reach_each_download_request() {
+        let request = || DownloadRequest {
+            options: SaveOptions::default(),
+            file_name: Some("x".into()),
+            prefix: Some("p".into()),
+            index: Some(2),
+        };
+        for resume in [true, false] {
+            let settings = Settings { resume, retries: 9, ..Settings::default() };
+            let built = save_request(settings, request());
+            assert_eq!(built.resume, resume);
+            assert_eq!(built.retries, MAX_RETRIES);
+            assert_eq!(built.prefix, Some(("p".into(), 2)));
+            assert_eq!(built.file_name.as_deref(), Some("x"));
+        }
     }
 
     #[test]
