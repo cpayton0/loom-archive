@@ -1,0 +1,18 @@
+name: Windows build
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --global pnpm@11.24.0
+      - run: rustup update stable
+      - run: pnpm install --frozen-lockfile
+      - run: cargo fetch --locked
+      - run: cargo test --workspace --locked --offline
+      - run: pnpm tauri build --no-bundle

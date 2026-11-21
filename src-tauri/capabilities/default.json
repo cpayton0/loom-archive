@@ -1,0 +1,24 @@
+{
+  "identifier": "main-analyzer",
+  "description": "The local main window can inspect a recording, open its Loom page, manage settings and per-download destinations, and save or cancel a download.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-analyze-url",
+    "allow-get-settings",
+    "allow-set-options",
+    "allow-set-theme",
+    "allow-set-retries",
+    "allow-choose-folder",
+    "allow-ask-each-time",
+    "allow-choose-ffmpeg",
+    "allow-auto-ffmpeg",
+    "allow-app-info",
+    "allow-choose-download-folder",
+    "allow-clear-download-folder",
+    "allow-save-recording",
+    "allow-cancel-save",
+    "allow-open-in-loom"
+  ]
+}
